@@ -4,9 +4,6 @@ use std::io;
 use bytes::{BytesMut, BufMut};
 use tokio_util::codec::Encoder;
 
-pub const DATA_SERIAL: &'static str = "/dev/ttyACM1";
-pub const CONTROL_SERIAL: &'static str = "/dev/ttyACM0";
-
 #[repr(u8)]
 pub enum Register {
     ChipAddress = 0,

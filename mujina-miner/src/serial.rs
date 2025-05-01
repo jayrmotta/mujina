@@ -1,11 +1,13 @@
-use crate::bitaxe;
-use crate::tracing::prelude::*;
 use futures::sink::SinkExt;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{self, Duration};
 use tokio_serial::{self, SerialPortBuilderExt};
 use tokio_util::codec::FramedWrite;
 use tokio_util::sync::CancellationToken;
+
+use crate::chip::bm13xx;
+use crate::board::bitaxe;
+use crate::tracing::prelude::*;
 
 /// Task for handling serial port communication
 pub async fn task(running: CancellationToken) {
@@ -15,7 +17,7 @@ pub async fn task(running: CancellationToken) {
         .open_native_async()
         .expect("failed to open data serial port");
 
-    let mut framed = FramedWrite::new(data_port, bitaxe::FrameCodec);
+    let mut framed = FramedWrite::new(data_port, bm13xx::FrameCodec);
 
     let mut control_port = tokio_serial::new(bitaxe::CONTROL_SERIAL, 115200)
         .open_native_async()
@@ -25,10 +27,10 @@ pub async fn task(running: CancellationToken) {
     control_port.flush().await.unwrap();
 
     while !running.is_cancelled() {
-        let read_address = bitaxe::Command::ReadRegister {
+        let read_address = bm13xx::Command::ReadRegister {
             all: true,
             address: 0,
-            register: bitaxe::Register::ChipAddress,
+            register: bm13xx::Register::ChipAddress,
         };
 
         trace!("Writing to port.");
