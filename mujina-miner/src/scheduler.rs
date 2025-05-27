@@ -16,10 +16,13 @@ use crate::chip::bm13xx;
 use crate::board::bitaxe;
 use crate::tracing::prelude::*;
 
+const CONTROL_SERIAL: &str = "/dev/ttyACM0";
+const DATA_SERIAL: &str = "/dev/ttyACM1";
+
 pub async fn task(running: CancellationToken) {
     trace!("Task started.");
 
-    let stream = tokio_serial::new(bitaxe::DATA_SERIAL, 115200)
+    let stream = tokio_serial::new(DATA_SERIAL, 115200)
         .open_native_async()
         .expect("failed to open data serial port");
     let (read_stream, write_stream) = tokio::io::split(stream);
@@ -60,7 +63,11 @@ pub async fn task(running: CancellationToken) {
         })
     };
 
-    bitaxe::deassert_reset().await;
+    let control_port = tokio_serial::new(CONTROL_SERIAL, 115200)
+        .open_native_async()
+        .expect("failed to open control serial port");
+    let mut board = bitaxe::Board::new(control_port);
+    board.momentary_reset().await.unwrap();
 
     let write_task = tokio::spawn(async move {
         while !running.is_cancelled() {
