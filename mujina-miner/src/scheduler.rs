@@ -66,7 +66,13 @@ pub async fn task(running: CancellationToken) {
     let control_port = tokio_serial::new(CONTROL_SERIAL, 115200)
         .open_native_async()
         .expect("failed to open control serial port");
-    let mut board = bitaxe::Board::new(control_port);
+    
+    // Create a new data port for the board (separate from the one used above)
+    let data_port = tokio_serial::new(DATA_SERIAL, 115200)
+        .open_native_async()
+        .expect("failed to open data serial port for board");
+    
+    let mut board = bitaxe::BitaxeBoard::new(control_port, data_port);
     board.momentary_reset().await.unwrap();
 
     let write_task = tokio::spawn(async move {
