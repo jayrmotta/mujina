@@ -8,7 +8,7 @@
 use tokio_serial::{self, SerialPortBuilderExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::board::{bitaxe::BitaxeBoard, Board};
+use crate::board::{bitaxe::BitaxeBoard, Board, BoardEvent};
 use crate::tracing::prelude::*;
 
 const CONTROL_SERIAL: &str = "/dev/ttyACM0";
@@ -30,32 +30,52 @@ pub async fn task(running: CancellationToken) {
     let mut board = BitaxeBoard::new(control_port, data_port);
     
     // Initialize the board (reset + chip discovery)
-    match board.initialize().await {
-        Ok(()) => {
+    let mut event_rx = match board.initialize().await {
+        Ok(rx) => {
             info!("Board initialized successfully");
-            info!("Found {} chip(s)", board.chips().len());
+            info!("Found {} chip(s)", board.chip_count());
+            rx
         }
         Err(e) => {
             error!("Failed to initialize board: {e}");
             return;
         }
-    }
+    };
     
     // Main scheduler loop
     info!("Starting mining scheduler");
     
     while !running.is_cancelled() {
-        // TODO: Main mining loop
-        // 1. Get work from pool
-        // 2. Distribute to chips via board.chips_mut()
-        // 3. Collect nonces
-        // 4. Submit shares
-        
-        // For now, just wait
         tokio::select! {
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                trace!("Scheduler heartbeat");
+            // Handle board events
+            Some(event) = event_rx.recv() => {
+                match event {
+                    BoardEvent::NonceFound(nonce_result) => {
+                        info!("Nonce found! Job {} nonce {:#x}", nonce_result.job_id, nonce_result.nonce);
+                        // TODO: Submit to pool
+                    }
+                    BoardEvent::JobComplete { job_id, reason } => {
+                        info!("Job {} completed: {:?}", job_id, reason);
+                        // TODO: Get new work from pool
+                    }
+                    BoardEvent::ChipError { chip_address, error } => {
+                        error!("Chip {} error: {}", chip_address, error);
+                    }
+                    BoardEvent::ChipStatusUpdate { chip_address, temperature_c, frequency_mhz } => {
+                        trace!("Chip {} status - temp: {:?}°C, freq: {:?}MHz", 
+                               chip_address, temperature_c, frequency_mhz);
+                    }
+                }
             }
+            
+            // Periodic work fetching (temporary)
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                trace!("Would fetch new work from pool");
+                // TODO: Get work from pool
+                // TODO: board.send_job(&job).await?;
+            }
+            
+            // Shutdown
             _ = running.cancelled() => {
                 info!("Scheduler shutdown requested");
                 break;

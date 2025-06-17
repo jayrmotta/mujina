@@ -6,8 +6,8 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 use futures::sink::SinkExt;
 
-use crate::board::{Board, BoardError, BoardInfo};
-use crate::chip::{Chip, ChipInfo};
+use crate::board::{Board, BoardError, BoardInfo, BoardEvent, JobCompleteReason};
+use crate::chip::{ChipInfo, MiningJob};
 use crate::chip::bm13xx::{self, BM13xxProtocol};
 
 /// Bitaxe Gamma hashboard abstraction.
@@ -23,6 +23,10 @@ pub struct BitaxeBoard {
     protocol: BM13xxProtocol,
     /// Discovered chip information (passive record-keeping)
     chip_infos: Vec<ChipInfo>,
+    /// Channel for sending board events
+    event_tx: Option<tokio::sync::mpsc::Sender<BoardEvent>>,
+    /// Current job ID
+    current_job_id: Option<u64>,
 }
 
 impl BitaxeBoard {
@@ -44,6 +48,8 @@ impl BitaxeBoard {
             data,
             protocol: BM13xxProtocol::new(false), // TODO: Make version rolling configurable
             chip_infos: Vec::new(),
+            event_tx: None,
+            current_job_id: None,
         }
     }
 
@@ -138,6 +144,18 @@ impl BitaxeBoard {
             Ok(())
         }
     }
+    
+    /// Spawn a task to monitor chip responses and emit events
+    fn spawn_event_monitor(&mut self) {
+        // TODO: Implement event monitoring
+        // This task should:
+        // 1. Read responses from the data stream
+        // 2. Decode using protocol
+        // 3. Emit appropriate events (NonceFound, ChipError, etc.)
+        // 4. Track job completion (by timeout or chip signal)
+        
+        tracing::warn!("Event monitor not yet implemented");
+    }
 }
 
 #[async_trait]
@@ -148,7 +166,7 @@ impl Board for BitaxeBoard {
         Ok(())
     }
     
-    async fn initialize(&mut self) -> Result<(), BoardError> {
+    async fn initialize(&mut self) -> Result<tokio::sync::mpsc::Receiver<BoardEvent>, BoardError> {
         // Reset the board first
         self.reset().await?;
         
@@ -157,17 +175,51 @@ impl Board for BitaxeBoard {
         
         tracing::info!("Board initialized with {} chip(s)", self.chip_infos.len());
         
+        // Create event channel
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        self.event_tx = Some(tx);
+        
+        // TODO: Spawn task to monitor chip responses and emit events
+        self.spawn_event_monitor();
+        
+        Ok(rx)
+    }
+    
+    fn chip_count(&self) -> usize {
+        self.chip_infos.len()
+    }
+    
+    fn chip_infos(&self) -> &[ChipInfo] {
+        &self.chip_infos
+    }
+    
+    async fn send_job(&mut self, job: &MiningJob) -> Result<(), BoardError> {
+        // TODO: Implement job distribution
+        // 1. Encode job using protocol
+        // 2. Send to each chip
+        // 3. Track job ID for completion
+        // 4. Start completion timer/estimation
+        
+        // Store current job ID
+        self.current_job_id = Some(job.job_id);
+        
+        // For now, just a placeholder
+        tracing::warn!("send_job not yet implemented");
         Ok(())
     }
     
-    fn chips(&self) -> &[Box<dyn Chip>] {
-        // TODO: Chips are now passive record-keeping, need to refactor Board trait
-        &[]
-    }
-    
-    fn chips_mut(&mut self) -> &mut Vec<Box<dyn Chip>> {
-        // TODO: Chips are now passive record-keeping, need to refactor Board trait
-        panic!("chips_mut not implemented - chips are now passive")
+    async fn cancel_job(&mut self, job_id: u64) -> Result<(), BoardError> {
+        // TODO: Implement job cancellation
+        // This might involve sending a new dummy job or reset command
+        
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(BoardEvent::JobComplete {
+                job_id,
+                reason: JobCompleteReason::Cancelled,
+            }).await;
+        }
+        
+        Ok(())
     }
     
     fn board_info(&self) -> BoardInfo {

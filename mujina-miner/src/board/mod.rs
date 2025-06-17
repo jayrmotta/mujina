@@ -3,13 +3,59 @@ pub(crate) mod bitaxe;
 use async_trait::async_trait;
 use std::error::Error;
 use std::fmt;
+use tokio::sync::mpsc;
 
-use crate::chip::{Chip, ChipError};
+use crate::chip::{ChipError, ChipInfo, MiningJob, NonceResult};
+
+/// Events emitted by a board during operation.
+#[derive(Debug, Clone)]
+pub enum BoardEvent {
+    /// A chip found a valid nonce
+    NonceFound(NonceResult),
+    
+    /// A mining job has completed
+    JobComplete {
+        job_id: u64,
+        reason: JobCompleteReason,
+    },
+    
+    /// An error occurred with a specific chip
+    ChipError {
+        chip_address: u8,
+        error: String, // String because ChipError might not be Clone
+    },
+    
+    /// A chip's status changed (e.g., temperature, frequency)
+    ChipStatusUpdate {
+        chip_address: u8,
+        temperature_c: Option<f32>,
+        frequency_mhz: Option<u32>,
+    },
+}
+
+/// Reasons why a mining job completed.
+#[derive(Debug, Clone, Copy)]
+pub enum JobCompleteReason {
+    /// The chip reported that it finished searching its nonce range
+    RangeExhausted,
+    
+    /// The board estimated completion based on elapsed time
+    TimeoutEstimate,
+    
+    /// The job was cancelled by the user
+    Cancelled,
+    
+    /// A new job was sent, implicitly completing the previous one
+    Superseded,
+}
 
 /// Represents a mining board containing one or more ASIC chips.
 /// 
 /// A board provides the interface between the host system and mining chips,
-/// handling hardware initialization, reset, and chip discovery.
+/// handling hardware initialization, reset, chip discovery, and mining operations.
+/// 
+/// Board implementations communicate asynchronously via an event stream rather
+/// than polling, allowing efficient handling of nonces and job completion.
 #[async_trait]
 pub trait Board: Send {
     /// Reset the board hardware.
@@ -20,14 +66,29 @@ pub trait Board: Send {
     
     /// Initialize the board and discover connected chips.
     /// 
-    /// After initialization, chips should be accessible via `chips()` or `chips_mut()`.
-    async fn initialize(&mut self) -> Result<(), BoardError>;
+    /// After initialization, the board is ready to receive mining jobs.
+    /// Returns a receiver for board events.
+    async fn initialize(&mut self) -> Result<mpsc::Receiver<BoardEvent>, BoardError>;
     
-    /// Get a reference to all discovered chips on this board.
-    fn chips(&self) -> &[Box<dyn Chip>];
+    /// Get the number of discovered chips on this board.
+    fn chip_count(&self) -> usize;
     
-    /// Get a mutable reference to all discovered chips on this board.
-    fn chips_mut(&mut self) -> &mut Vec<Box<dyn Chip>>;
+    /// Get information about discovered chips.
+    fn chip_infos(&self) -> &[ChipInfo];
+    
+    /// Send a mining job to all chips on this board.
+    /// 
+    /// Each chip will work on the same job but search different nonce ranges
+    /// automatically based on their internal core architecture.
+    /// 
+    /// The job completion will be reported via the event stream as
+    /// `BoardEvent::JobComplete`.
+    async fn send_job(&mut self, job: &MiningJob) -> Result<(), BoardError>;
+    
+    /// Cancel the current mining job.
+    /// 
+    /// This will trigger a `BoardEvent::JobComplete` with reason `Cancelled`.
+    async fn cancel_job(&mut self, job_id: u64) -> Result<(), BoardError>;
     
     /// Get board identification/info
     fn board_info(&self) -> BoardInfo;
