@@ -11,7 +11,7 @@ use crc::*;
 
 mod crc;
 
-#[derive(FromRepr)]
+#[derive(FromRepr, Copy, Clone)]
 #[repr(u8)]
 pub enum RegisterAddress {
     ChipAddress = 0x00,
@@ -88,21 +88,54 @@ impl Command {
 
     fn encode(&self, dst: &mut BytesMut) {
         match self {
-            Command::ReadRegister { all, .. } => {
+            Command::ReadRegister { all, chip_address, register_address } => {
                 dst.put_u8(Self::build_flags(
                     CommandFlagsType::Command,
                     *all,
                     CommandFlagsCmd::ReadRegister,
                 ));
 
-                TODO
+                const FLAGS_LEN: u8 = 1;
+                const CHIP_ADDR_LEN: u8 = 1;
+                const REG_ADDR_LEN: u8 = 1;
+                const LENGTH_FIELD_LEN: u8 = 1;
+                const CRC_LEN: u8 = 1;
+                const TOTAL_LEN: u8 = FLAGS_LEN + LENGTH_FIELD_LEN + CHIP_ADDR_LEN + REG_ADDR_LEN + CRC_LEN;
+                
+                dst.put_u8(TOTAL_LEN);
+                dst.put_u8(*chip_address);
+                dst.put_u8(*register_address as u8);
             }
-            Command::WriteRegister { all, .. } => {
+            Command::WriteRegister { all, chip_address, register } => {
                 dst.put_u8(Self::build_flags(
                     CommandFlagsType::Command,
                     *all,
                     CommandFlagsCmd::WriteRegisterOrJob,
                 ));
+
+                const FLAGS_LEN: u8 = 1;
+                const CHIP_ADDR_LEN: u8 = 1;
+                const REG_ADDR_LEN: u8 = 1;
+                const REG_DATA_LEN: u8 = 4;
+                const LENGTH_FIELD_LEN: u8 = 1;
+                const CRC_LEN: u8 = 1;
+                const TOTAL_LEN: u8 = FLAGS_LEN + LENGTH_FIELD_LEN + CHIP_ADDR_LEN + REG_ADDR_LEN + REG_DATA_LEN + CRC_LEN;
+
+                dst.put_u8(TOTAL_LEN);
+                dst.put_u8(*chip_address);
+                
+                match register {
+                    Register::ChipAddress { chip_id, core_count, address } => {
+                        dst.put_u8(RegisterAddress::ChipAddress as u8);
+                        dst.put_u16(*chip_id);
+                        dst.put_u8(*core_count);
+                        dst.put_u8(*address);
+                    }
+                    Register::RegA8 { unknown } => {
+                        dst.put_u8(RegisterAddress::RegA8 as u8);
+                        dst.put_u32(*unknown);
+                    }
+                }
             }
         }
     }
@@ -252,6 +285,22 @@ mod command_tests {
                 register_address: RegisterAddress::ChipAddress,
             },
             &[0x55, 0xaa, 0x52, 0x05, 0x00, 0x00, 0x0a],
+        );
+    }
+
+    #[test]
+    fn write_register_chip_address() {
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: false,
+                chip_address: 0x01,
+                register: Register::ChipAddress {
+                    chip_id: 0x1370,
+                    core_count: 0x00,
+                    address: 0x01,
+                },
+            },
+            &[0x55, 0xaa, 0x41, 0x09, 0x01, 0x00, 0x13, 0x70, 0x00, 0x01, 0x0a],
         );
     }
 
