@@ -14,7 +14,11 @@ progresses and we gain experience with multi-chip systems.
 
 - ESP-miner BM1370 implementation
 - CGMiner driver implementations
-- Emberone-miner BM1362/BM1368 implementation
+- Emberone-miner BM1362 implementation
+- Serial captures from production hardware:
+  - Bitaxe Gamma (single BM1370 chip)
+  - Antminer S21 Pro (65x BM1370 chips)
+  - Antminer S19 J Pro (126x BM1362 chips)
 
 ## Overview
 
@@ -27,8 +31,10 @@ reporting.
 
 Different chips in the BM13xx family have varying core architectures:
 
-- **BM1362**: Core count unknown (used in Antminer S19 series)
+- **BM1362**: Core count unknown (used in Antminer S19 J Pro)
+  - Chip ID: `[0x13, 0x62]`
 - **BM1370**: 80 main cores × 16 sub-cores = 1,280 total hashing units
+  - Chip ID: `[0x13, 0x70]`
 
 The core architecture affects how nonces are reported and job IDs are encoded.
 
@@ -87,10 +93,26 @@ Bits 4-0: CMD value
 ```
 
 Common Type/Flags values:
-- `0x42` = TYPE=0, BROADCAST=0, CMD=2 (read register from specific chip)
+- `0x40` = TYPE=0, BROADCAST=0, CMD=0 (set chip address)
 - `0x41` = TYPE=0, BROADCAST=0, CMD=1 (write register to specific chip)
+- `0x42` = TYPE=0, BROADCAST=0, CMD=2 (read register from specific chip)
 - `0x51` = TYPE=0, BROADCAST=1, CMD=1 (write register to all chips)
+- `0x52` = TYPE=0, BROADCAST=1, CMD=2 (read register from all chips - chip discovery)
+- `0x53` = TYPE=0, BROADCAST=1, CMD=3 (chain inactive - prepare for addressing)
 - `0x21` = TYPE=1, BROADCAST=0, CMD=1 (send work/job)
+
+### Set Chip Address (CMD=0)
+Assigns an address to a chip in the serial chain.
+
+**Request Format:**
+```
+| 0x55 0xAA | Type/Flags | Length | Chip_Addr | Reg_Addr | CRC5 |
+```
+- Length: Always `0x05` (5 bytes excluding preamble)
+- Type/Flags: `0x40` (single chip addressing)
+- Chip_Addr: The address to assign (typically increments by 2: 0x00, 0x02, 0x04...)
+- Reg_Addr: Always `0x00`
+- Example: `55 AA 40 05 04 00 15` (assign address 0x04)
 
 ### Read Register (CMD=2)
 Reads a 4-byte register from the ASIC.
@@ -100,10 +122,8 @@ Reads a 4-byte register from the ASIC.
 | 0x55 0xAA | Type/Flags | Length | Chip_Addr | Reg_Addr | CRC5 |
 ```
 - Length: Always `0x05` (5 bytes excluding preamble)
-- Type/Flags: `0x42` for specific chip (broadcast reads would cause bus 
-collisions)
-- Example: `55 AA 42 05 00 00 1C` (read register 0x00 from chip at address 
-0x00)
+- Type/Flags: `0x42` for specific chip, `0x52` for broadcast (chip discovery)
+- Example: `55 AA 52 05 00 00 0A` (broadcast read register 0x00 - chip discovery)
 
 ### Write Register (CMD=1)
 Writes a 4-byte value to a register.
@@ -258,8 +278,9 @@ Example BM1370 response: `AA 55 18 00 A6 40 02 99 22 F9 91`
 
 #### BM1362:
 - Similar 11-byte response format
-- Job ID encoding likely follows BM1368 pattern
+- Different field encoding than BM1370
 - Midstate_Num may encode chip ID in multi-chip configurations
+- Example response: `AA 55 6D B8 8E E1 01 04 03 54 94`
 
 
 ### Special Response Types
@@ -288,13 +309,14 @@ Key registers used across BM13xx chips:
 | 0x14 | TICKET_MASK | Difficulty mask for share submission |
 | 0x18 | MISC_CONTROL | UART settings and miscellaneous control |
 | 0x28 | UART_BAUD | UART baud rate configuration |
+| 0x2C | UART_RELAY | UART relay configuration (multi-chip chains) |
 | 0x3C | CORE_REGISTER | Core configuration and control |
 | 0x54 | ANALOG_MUX | Analog mux control (rumored to control temp diode) |
-| 0x58 | UNKNOWN_CTRL | Unknown control register (value 0x11110100) |
+| 0x58 | IO_DRIVER_STRENGTH | IO driver strength configuration |
+| 0x68 | PLL3_PARAMETER | PLL3 configuration (multi-chip chains) |
 | 0xA4 | VERSION_MASK | Version rolling mask configuration |
-| 0xA8 | UNKNOWN_INIT | Initialization register (value 0x07000007) |
-| 0xB9 | MISC_SETTINGS | Miscellaneous settings (BM1370 only, value 
-0x00004480) |
+| 0xA8 | INIT_CONTROL | Initialization control register |
+| 0xB9 | MISC_SETTINGS | Miscellaneous settings (BM1370 only, value 0x00004480) |
 
 ### Register Details
 
@@ -302,9 +324,11 @@ Key registers used across BM13xx chips:
 Contains chip identification and configuration (4 bytes):
 - **Byte 0-1**: Chip type identifier
   - BM1370: `[0x13, 0x70]`
-  - BM1362: `[0x13, 0x62]` (presumed)
+  - BM1362: `[0x13, 0x62]`
 - **Byte 2**: Core count or configuration
-- **Byte 3**: Chip address (assigned)
+  - BM1362: `0x03`
+  - BM1370: `0x00`
+- **Byte 3**: Chip address (assigned during initialization)
 
 Note: The chip type identifier should be treated as a byte sequence rather than
 interpreted as an integer value to avoid endianness confusion.
@@ -328,22 +352,52 @@ Sets the difficulty mask (4 bytes, little-endian):
 - Example: difficulty 256 = 0xFF000000 → transmitted as [0xFF, 0x00, 0x00, 
 0x00]
 
+#### 0x2C - UART_RELAY
+Controls UART signal relay in multi-chip chains (4 bytes):
+- Used on first and last chips in each domain
+- Format appears to encode domain boundaries
+- Example values from S21 Pro: 0x00130003, 0x00180003, etc.
+
 #### 0x3C - CORE_REGISTER
-Requires multiple writes during initialization:
+Requires multiple writes during initialization. Values differ by chip type:
+
+**BM1362 sequence:**
+1. Write 0x80008540
+2. Write 0x80008008
+
+**BM1370 sequence:**
 1. Write 0x80008B00
-2. Write 0x80008C00  
+2. Write 0x8000800C
 3. Write 0x800082AA (per chip configuration)
 
 #### 0x54 - ANALOG_MUX
 Controls analog multiplexer, possibly for temperature sensing:
 - BM1370: Write value 0x00000002
-- BM1368: Write value 0x00000003
+- BM1362: Write value 0x00000003
 - Purpose not fully documented by manufacturer
+
+#### 0x58 - IO_DRIVER_STRENGTH
+Controls IO signal driver strength (4 bytes):
+- Normal chips: 0x00011111
+- Domain-end chips: 0x0001F111 (stronger drive for signal integrity)
+- Configured differently for last chip in each domain
+
+#### 0x68 - PLL3_PARAMETER
+PLL3 configuration for multi-chip chains:
+- Value: 0x5AA55AA5 (appears to be a magic pattern)
+- Only used in multi-chip configurations
 
 #### 0xA4 - VERSION_MASK
 Controls which bits of the version field can be rolled:
 - Lower 16 bits typically enabled for rolling
 - Set via Stratum configuration (e.g., 0x1FFFE000)
+- Initial enable: 0xFFFF0090 (from captures)
+
+#### 0xA8 - INIT_CONTROL
+Initialization control register with chip-specific values:
+- BM1362: 0x00000000
+- BM1370 single-chip: 0x00070000
+- BM1370 multi-chip: 0x00070000 initially, then 0xF0010700 per chip
 
 #### 0xB9 - MISC_SETTINGS (BM1370 only)
 Undocumented miscellaneous settings register:
@@ -354,41 +408,91 @@ Undocumented miscellaneous settings register:
 
 ## Initialization Sequence
 
-Typical initialization flow for BM13xx chips:
+### Single-Chip Initialization (e.g., Bitaxe)
 
 1. **Chip Detection**
-   - Write 0x9000A4 to register 0xA4 (reset/enable)
+   - Write 0xFFFF0090 to register 0xA4 (enable and set version mask)
    - Read register 0x00 to get chip_id
-   - Verify chip type (0x1370, 0x1362, etc.)
+   - Verify chip type
 
 2. **Basic Configuration**
-   - Write register 0xA8 with 0x07000007
-   - Write register 0x18 with 0x00C100F0 (UART/misc control)
-   - Configure register 0x3C with multiple writes
+   - Write register 0xA8 with 0x00070000
+   - Write register 0x18 with 0x0000C1F0 (UART/misc control)
+   - Configure register 0x3C with chip-specific sequence
 
 3. **Mining Configuration**
    - Set difficulty via register 0x14
-   - Configure version mask via register 0xA4
-   - Write register 0x58 with 0x11110100
-   - Write register 0xB9 with 0x00004480 (BM1370)
-   - Write register 0x54 with 0x00000002 (BM1370)
-   - Write register 0xB9 again with 0x00004480 (BM1370)
+   - Configure IO driver strength (0x58)
+   - Write register 0xB9 (BM1370 only)
+   - Configure analog mux (0x54)
 
 4. **Frequency Ramping**
-   - Start at low frequency (e.g., 56.25 MHz)
-   - Gradually increase to target (e.g., 525 MHz)
+   - Start at low frequency
+   - Gradually increase to target
    - Use register 0x08 for PLL control
-   - Small steps ensure stable operation
 
-5. **Baud Rate Change** (optional)
-   - Configure registers 0x10 and 0x28
-   - Switch UART from 115200 to higher rate (e.g., 1000000)
+### Multi-Chip Initialization (e.g., S21 Pro, S19 J Pro)
 
-6. **Chip Addressing** (multi-chip chains - details uncertain)
-   - Calculate address interval: `256 / chip_count`
-   - Assign addresses: `chip_index * interval`
-   - Set via register write commands
-   - *Exact mechanism may vary between implementations*
+1. **Chain Reset and Discovery**
+   - Write 0xFFFF0090 to register 0xA4 three times
+   - Broadcast read register 0x00 (command 0x52)
+   - Count responding chips
+
+2. **Initial Configuration**
+   - Write register 0xA8 (chip-specific value)
+   - Write register 0x18 (UART control)
+   - Send chain inactive command (0x53)
+
+3. **Address Assignment**
+   - Assign addresses incrementing by 2 (0x00, 0x02, 0x04...)
+   - Use command 0x40 for each address
+   - Typically assign 128 addresses regardless of actual chip count
+
+4. **Domain Configuration** (BM1370 chains)
+   - Configure IO driver strength on domain-end chips
+   - Set UART relay registers on domain boundaries
+   - Write PLL3 parameter (0x68)
+
+5. **Per-Chip Configuration**
+   - Configure each chip individually with registers 0xA8, 0x18, 0x3C
+   - Different sequence for first vs. subsequent chips
+
+6. **Baud Rate Change**
+   - Configure register 0x28 for higher baud rate
+   - BM1370: 3Mbaud (0x00003001)
+   - BM1362: Different rate (0x00003011)
+
+7. **Final Configuration**
+   - Set NONCE_RANGE (0x10) based on chip count
+   - Configure remaining registers
+   - Begin frequency ramping
+
+## Domain Management in Multi-Chip Chains
+
+Large chip chains are divided into domains for signal integrity:
+
+### Domain Structure
+- Chips grouped into domains (typically 5-7 chips per domain)
+- Special configuration for first and last chip in each domain
+- Stronger IO drivers on domain boundaries
+
+### Domain-Specific Registers
+
+**IO Driver Strength (0x58):**
+- Normal chips: 0x00011111
+- Domain-end chips: 0x0001F111
+
+**UART Relay (0x2C):**
+- Configured on domain boundary chips
+- Values encode domain position and relay settings
+
+### Example: S21 Pro Domain Configuration
+```
+Domain 0: Chips 0x00-0x08 (relay: 0x004F0003)
+Domain 1: Chips 0x0A-0x12 (relay: 0x004A0003)
+Domain 2: Chips 0x14-0x1C (relay: 0x00450003)
+...
+```
 
 ## Key Implementation Details
 
@@ -430,11 +534,13 @@ The NONCE_RANGE register (0x10) uses empirically-determined values to optimize
 nonce distribution. See discussion at: https://github.com/bitaxeorg/ESP-Miner/pull/167
 
 **Known Values (4-byte little-endian):**
-- 1 chip: `0x00001EB5` (e.g., Bitaxe, S21 Pro single chip)
-- 77 chips: `0x0000115A` (S19k Pro)
-- 110 chips: `0x0000141C` (S19XP Stock)
-- 110 chips: `0x00001446` (S19XP Luxos)
-- Full range: `0x000F0000` (experimental, searches full 32-bit space)
+- 1 chip: `0x00001EB5` (Bitaxe single BM1370)
+- 65 chips: `0x00001EB5` (S21 Pro - same as single chip!)
+- 77 chips: `0x0000115A` (S19k Pro - from ESP-miner)
+- 110 chips: `0x0000141C` (S19XP Stock - from ESP-miner)
+- 110 chips: `0x00001446` (S19XP Luxos - from ESP-miner)
+- 126 chips: `0x00001381` (S19 J Pro BM1362)
+- Full range: `0x000F0000` (experimental, searches full 32-bit space?)
 
 **How It Likely Works:**
 While the exact mechanism is undocumented, analysis suggests:
@@ -596,6 +702,6 @@ space partitioning:
 
 | Chip | Chip ID | Cores | Sub-cores | Job ID Bits | Used In |
 |------|---------|-------|-----------|-------------|----------|
-| BM1362 | 0x1362? | Unknown | Unknown | Unknown | Antminer S19 |
-| BM1370 | 0x1370 | 80 | 16 | 4+4 | Bitaxe Gamma |
+| BM1362 | 0x1362 | Unknown | Unknown | Unknown | Antminer S19 J Pro |
+| BM1370 | 0x1370 | 80 | 16 | 4+4 | Bitaxe Gamma, S21 Pro |
 
