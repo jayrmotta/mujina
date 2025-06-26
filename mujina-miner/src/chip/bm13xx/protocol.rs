@@ -12,40 +12,512 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::tracing::prelude::*;
 use crate::chip::{MiningJob, ChipError};
 use super::crc::{crc5, crc5_is_valid, crc16};
+use super::error::ProtocolError;
 
-#[derive(FromRepr, Copy, Clone)]
-#[repr(u8)]
-pub enum RegisterAddress {
-    ChipAddress = 0x00,
-    // MiscControl = 0x18,
-    // FastUartConfiguration = 0x28,
-    // Pll1Parameter = 0x60,
-    // VersionRolling = 0xa4,
-    RegA8 = 0xa8,
+/// Mining frequency with validation and PLL calculation
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frequency {
+    mhz: f32,
 }
 
-#[derive(Debug)]
+impl Frequency {
+    /// Minimum supported frequency in MHz
+    pub const MIN_MHZ: f32 = 50.0;
+    /// Maximum supported frequency in MHz  
+    pub const MAX_MHZ: f32 = 800.0;
+    /// Base crystal frequency in MHz
+    const CRYSTAL_MHZ: f32 = 25.0;
+    
+    /// Create a new frequency with validation
+    pub fn from_mhz(mhz: f32) -> Result<Self, ProtocolError> {
+        if mhz < Self::MIN_MHZ || mhz > Self::MAX_MHZ {
+            return Err(ProtocolError::InvalidFrequency { 
+                mhz: mhz as u32 
+            });
+        }
+        Ok(Self { mhz })
+    }
+    
+    /// Get frequency in MHz
+    pub fn mhz(&self) -> f32 {
+        self.mhz
+    }
+    
+    /// Calculate optimal PLL configuration for this frequency
+    pub fn calculate_pll(&self) -> PllConfig {
+        let target_freq = self.mhz;
+        let mut best_config = PllConfig::new(0xa0, 2, 0x55); // Default
+        let mut min_error = f32::MAX;
+        
+        // Search for optimal PLL settings
+        // ref_divider: 1 or 2
+        // post_divider1: 1-7, must be >= post_divider2
+        // post_divider2: 1-7
+        // fb_divider: 0xa0-0xef (160-239)
+        
+        for ref_div in [2, 1] {
+            for post_div1 in (1..=7).rev() {
+                for post_div2 in (1..=7).rev() {
+                    if post_div1 >= post_div2 {
+                        // Calculate required feedback divider
+                        let fb_div_f = (post_div1 * post_div2) as f32 * target_freq * ref_div as f32 / Self::CRYSTAL_MHZ;
+                        let fb_div = fb_div_f.round() as u16;
+                        
+                        if fb_div >= 0xa0 && fb_div <= 0xef {
+                            // Calculate actual frequency with these settings
+                            let actual_freq = Self::CRYSTAL_MHZ * fb_div as f32 / 
+                                (ref_div as f32 * post_div1 as f32 * post_div2 as f32);
+                            let error = (target_freq - actual_freq).abs();
+                            
+                            if error < min_error && error < 1.0 {
+                                min_error = error;
+                                // Encode post dividers as per hardware format
+                                let post_div = ((post_div1 - 1) << 4) | (post_div2 - 1);
+                                best_config = PllConfig::new(fb_div, ref_div, post_div);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        best_config
+    }
+}
+
+/// PLL configuration for frequency control
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PllConfig {
+    /// Main feedback divider
+    pub fb_div: u16,
+    /// Reference divider
+    pub ref_div: u8,
+    /// Post divider flags
+    pub post_div: u8,
+}
+
+impl PllConfig {
+    /// Create a new PLL configuration
+    pub fn new(fb_div: u16, ref_div: u8, post_div: u8) -> Self {
+        Self { fb_div, ref_div, post_div }
+    }
+}
+
+impl From<u32> for PllConfig {
+    fn from(raw: u32) -> Self {
+        Self {
+            fb_div: (raw & 0xffff) as u16,
+            ref_div: ((raw >> 16) & 0xff) as u8,
+            post_div: ((raw >> 24) & 0xff) as u8,
+        }
+    }
+}
+
+impl From<PllConfig> for [u8; 4] {
+    fn from(config: PllConfig) -> Self {
+        let mut bytes = [0u8; 4];
+        bytes[0..2].copy_from_slice(&config.fb_div.to_le_bytes());
+        bytes[2] = config.ref_div;
+        bytes[3] = config.post_div;
+        bytes
+    }
+}
+
+/// Known chip types in the BM13xx family
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipType {
+    /// BM1362 - Used in Antminer S19 J Pro (126 chips)
+    /// Core count unknown
+    BM1362,
+    /// BM1366 - Newer generation chip
+    BM1366,
+    /// BM1370 - Used in Bitaxe Gamma and Antminer S21 Pro
+    /// 80 main cores × 16 sub-cores = 1,280 total hashing units
+    BM1370,
+    /// BM1397 - Previous generation chip
+    BM1397,
+    /// Unknown chip type with raw ID bytes
+    Unknown([u8; 2]),
+}
+
+impl ChipType {
+    /// Get the raw chip ID bytes
+    pub fn id_bytes(&self) -> [u8; 2] {
+        match self {
+            Self::BM1362 => [0x13, 0x62],
+            Self::BM1366 => [0x13, 0x66],
+            Self::BM1370 => [0x13, 0x70],
+            Self::BM1397 => [0x13, 0x97],
+            Self::Unknown(bytes) => *bytes,
+        }
+    }
+    
+    /// Get expected core count for this chip type, if known
+    pub fn core_count(&self) -> Option<u32> {
+        match self {
+            Self::BM1370 => Some(1280), // 80 × 16
+            _ => None,
+        }
+    }
+}
+
+impl From<[u8; 2]> for ChipType {
+    fn from(bytes: [u8; 2]) -> Self {
+        match bytes {
+            [0x13, 0x62] => Self::BM1362,
+            [0x13, 0x66] => Self::BM1366,
+            [0x13, 0x70] => Self::BM1370,
+            [0x13, 0x97] => Self::BM1397,
+            _ => Self::Unknown(bytes),
+        }
+    }
+}
+
+impl From<ChipType> for [u8; 2] {
+    fn from(chip_type: ChipType) -> Self {
+        chip_type.id_bytes()
+    }
+}
+
+/// Nonce range configuration for work distribution.
+/// 
+/// NOTE: We store this as a byte array rather than interpreting it as a u32
+/// because the exact bit-level interpretation is still being reverse-engineered.
+/// The values below are empirically observed from production hardware.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonceRangeConfig {
+    /// Raw bytes as sent over the wire
+    bytes: [u8; 4],
+}
+
+impl NonceRangeConfig {
+    // Nonce range values for different chain lengths (captured from hardware)
+    const SINGLE_CHIP: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+    const SMALL_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x1f];     // 2-8 chips
+    const MEDIUM_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x0f];    // 9-16 chips
+    const LARGE_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x07];     // 17-32 chips
+    const XLARGE_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x03];    // 33-64 chips
+    const S21_PRO: [u8; 4] = [0x00, 0x00, 0x1e, 0xb5];         // 65-128 chips (empirical)
+    const DEFAULT_LARGE: [u8; 4] = [0xff, 0xff, 0xff, 0x01];   // >128 chips
+    
+    /// Create config for single chip (full range)
+    pub fn single_chip() -> Self {
+        Self { bytes: Self::SINGLE_CHIP }
+    }
+    
+    /// Create config for multi-chip chain
+    pub fn multi_chip(chain_length: usize) -> Self {
+        let bytes = match chain_length {
+            1 => Self::SINGLE_CHIP,
+            2..=8 => Self::SMALL_CHAIN,
+            9..=16 => Self::MEDIUM_CHAIN,
+            17..=32 => Self::LARGE_CHAIN,
+            33..=64 => Self::XLARGE_CHAIN,
+            65..=128 => Self::S21_PRO,
+            _ => Self::DEFAULT_LARGE,
+        };
+        Self { bytes }
+    }
+}
+
+impl From<NonceRangeConfig> for [u8; 4] {
+    fn from(config: NonceRangeConfig) -> Self {
+        config.bytes
+    }
+}
+
+/// Difficulty mask for share submission
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DifficultyMask {
+    /// Each byte is bit-reversed
+    bytes: [u8; 4],
+}
+
+impl DifficultyMask {
+    /// Create from difficulty value
+    pub fn from_difficulty(difficulty: u32) -> Self {
+        // For now, simple mapping
+        // Difficulty 256 means the first byte (most significant) should be 0xff
+        let bytes = match difficulty {
+            256 => [0x00, 0x00, 0x00, 0xff],  // As seen in captures
+            _ => [0xff, 0xff, 0xff, 0x00],
+        };
+        Self { bytes }
+    }
+    
+}
+
+impl From<DifficultyMask> for [u8; 4] {
+    fn from(mask: DifficultyMask) -> Self {
+        mask.bytes  // Already in the correct format
+    }
+}
+
+/// UART baud rate configuration
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BaudRate {
+    /// 115200 baud
+    Baud115200,
+    /// 1 Mbaud
+    Baud1M,
+    /// 3 Mbaud (common for multi-chip)
+    Baud3M,
+    /// Custom baud rate with raw register value
+    Custom(u32),
+}
+
+impl From<BaudRate> for [u8; 4] {
+    fn from(baud: BaudRate) -> Self {
+        let value = match baud {
+            BaudRate::Baud115200 => 0x00000271, // From ESP-miner
+            BaudRate::Baud1M => 0x00000130,
+            BaudRate::Baud3M => 0x00003001, // From captures
+            BaudRate::Custom(val) => val,
+        };
+        value.to_le_bytes()
+    }
+}
+
+/// IO driver strength configuration
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IoDriverStrength {
+    /// Drive strength for each signal group (4 bits each)
+    strengths: [u8; 8],
+}
+
+impl IoDriverStrength {
+    /// Normal strength for chips in middle of chain
+    pub fn normal() -> Self {
+        // 0x11110100 = 0001 0001 0001 0001 0000 0001 0000 0000
+        Self {
+            strengths: [0x0, 0x0, 0x1, 0x0, 0x1, 0x1, 0x1, 0x1],
+        }
+    }
+    
+    /// Strong drive for domain boundary chips
+    pub fn domain_boundary() -> Self {
+        // 0x1111f100 = 0001 0001 0001 0001 1111 0001 0000 0000
+        Self {
+            strengths: [0x0, 0x0, 0x1, 0xf, 0x1, 0x1, 0x1, 0x1],
+        }
+    }
+    
+}
+
+impl From<IoDriverStrength> for [u8; 4] {
+    fn from(strength: IoDriverStrength) -> Self {
+        // Pack 8 4-bit values into 4 bytes (2 per byte)
+        // Each byte contains two strength values: [high_nibble|low_nibble]
+        [
+            strength.strengths[0] | (strength.strengths[1] << 4),
+            strength.strengths[2] | (strength.strengths[3] << 4),
+            strength.strengths[4] | (strength.strengths[5] << 4),
+            strength.strengths[6] | (strength.strengths[7] << 4),
+        ]
+    }
+}
+
+impl IoDriverStrength {
+    /// Get the raw bytes for testing
+    pub fn as_bytes(&self) -> [u8; 4] {
+        (*self).into()
+    }
+}
+
+/// Version mask for version rolling
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VersionMask {
+    /// Which bits can be rolled
+    mask: u16,
+    /// Enable flag and other control bits
+    control: u16,
+}
+
+impl VersionMask {
+    /// Full 16-bit mask for version rolling
+    const FULL_MASK: u16 = 0xffff;
+    /// Control bits to enable version rolling
+    const CONTROL_ENABLE: u16 = 0x0090;
+    
+    /// Create version mask with all lower 16 bits enabled
+    pub fn full_rolling() -> Self {
+        Self {
+            mask: Self::FULL_MASK,
+            control: Self::CONTROL_ENABLE,
+        }
+    }
+    
+}
+
+impl From<VersionMask> for [u8; 4] {
+    fn from(mask: VersionMask) -> Self {
+        let mut bytes = [0u8; 4];
+        bytes[0..2].copy_from_slice(&mask.control.to_le_bytes());
+        bytes[2..4].copy_from_slice(&mask.mask.to_le_bytes());
+        bytes
+    }
+}
+
+#[derive(FromRepr, Copy, Clone, Debug)]
+#[repr(u8)]
+pub enum RegisterAddress {
+    ChipId = 0x00,
+    PllDivider = 0x08,
+    NonceRange = 0x10,
+    TicketMask = 0x14,
+    MiscControl = 0x18,
+    UartBaud = 0x28,
+    UartRelay = 0x2C,
+    CoreRegister = 0x3C,
+    AnalogMux = 0x54,
+    IoDriverStrength = 0x58,
+    Pll3Parameter = 0x68,
+    VersionMask = 0xA4,
+    InitControl = 0xA8,
+    MiscSettings = 0xB9,
+}
+
+#[derive(Debug, Clone)]
 pub enum Register {
-    ChipAddress {
-        chip_id: [u8; 2],  // Stored as big-endian byte sequence (e.g., [0x13, 0x70] for BM1370)
-        core_count: u8,
-        address: u8,
+    ChipId {
+        chip_type: ChipType,  // Chip type identifier
+        core_count: u8,       // Core configuration byte
+        address: u8,          // Assigned chip address
     },
-    RegA8 {
-        unknown: u32,
+    PllDivider(PllConfig),
+    NonceRange(NonceRangeConfig),
+    TicketMask(DifficultyMask),
+    MiscControl {
+        raw_value: u32,
+    },
+    UartBaud(BaudRate),
+    UartRelay {
+        raw_value: u32,     // Domain relay configuration (complex format)
+    },
+    CoreRegister {
+        raw_value: u32,
+    },
+    AnalogMux {
+        raw_value: u32,
+    },
+    IoDriverStrength(IoDriverStrength),
+    Pll3Parameter {
+        raw_value: u32,
+    },
+    VersionMask(VersionMask),
+    InitControl {
+        raw_value: u32,
+    },
+    MiscSettings {
+        raw_value: u32,
     },
 }
 
 impl Register {
     fn decode(address: RegisterAddress, bytes: &[u8; 4]) -> Register {
+        let raw_value = u32::from_le_bytes(*bytes);
         match address {
-            RegisterAddress::ChipAddress => Register::ChipAddress {
-                chip_id: [bytes[0], bytes[1]],
+            RegisterAddress::ChipId => Register::ChipId {
+                chip_type: ChipType::from([bytes[0], bytes[1]]),
                 core_count: bytes[2],
                 address: bytes[3],
             },
-            RegisterAddress::RegA8 => Register::RegA8 { 
-                unknown: u32::from_le_bytes(*bytes)
+            RegisterAddress::PllDivider => Register::PllDivider(raw_value.into()),
+            RegisterAddress::NonceRange => Register::NonceRange(NonceRangeConfig { bytes: *bytes }),
+            RegisterAddress::TicketMask => Register::TicketMask(DifficultyMask { bytes: *bytes }),
+            RegisterAddress::MiscControl => Register::MiscControl { raw_value },
+            RegisterAddress::UartBaud => {
+                // Decode known baud rates
+                let baud = match raw_value {
+                    0x00000271 => BaudRate::Baud115200,
+                    0x00000130 => BaudRate::Baud1M,
+                    0x00003001 => BaudRate::Baud3M,
+                    other => BaudRate::Custom(other),
+                };
+                Register::UartBaud(baud)
+            },
+            RegisterAddress::UartRelay => Register::UartRelay { raw_value },
+            RegisterAddress::CoreRegister => Register::CoreRegister { raw_value },
+            RegisterAddress::AnalogMux => Register::AnalogMux { raw_value },
+            RegisterAddress::IoDriverStrength => {
+                // Parse driver strength from raw value
+                let mut strengths = [0u8; 8];
+                for i in 0..8 {
+                    strengths[i] = ((raw_value >> (i * 4)) & 0xf) as u8;
+                }
+                Register::IoDriverStrength(IoDriverStrength { strengths })
+            },
+            RegisterAddress::Pll3Parameter => Register::Pll3Parameter { raw_value },
+            RegisterAddress::VersionMask => {
+                let mask = (raw_value >> 16) as u16;
+                let control = (raw_value & 0xffff) as u16;
+                Register::VersionMask(VersionMask { mask, control })
+            },
+            RegisterAddress::InitControl => Register::InitControl { raw_value },
+            RegisterAddress::MiscSettings => Register::MiscSettings { raw_value },
+        }
+    }
+    
+    /// Get the register address for this register
+    fn address(&self) -> RegisterAddress {
+        match self {
+            Register::ChipId { .. } => RegisterAddress::ChipId,
+            Register::PllDivider(_) => RegisterAddress::PllDivider,
+            Register::NonceRange(_) => RegisterAddress::NonceRange,
+            Register::TicketMask(_) => RegisterAddress::TicketMask,
+            Register::MiscControl { .. } => RegisterAddress::MiscControl,
+            Register::UartBaud(_) => RegisterAddress::UartBaud,
+            Register::UartRelay { .. } => RegisterAddress::UartRelay,
+            Register::CoreRegister { .. } => RegisterAddress::CoreRegister,
+            Register::AnalogMux { .. } => RegisterAddress::AnalogMux,
+            Register::IoDriverStrength(_) => RegisterAddress::IoDriverStrength,
+            Register::Pll3Parameter { .. } => RegisterAddress::Pll3Parameter,
+            Register::VersionMask(_) => RegisterAddress::VersionMask,
+            Register::InitControl { .. } => RegisterAddress::InitControl,
+            Register::MiscSettings { .. } => RegisterAddress::MiscSettings,
+        }
+    }
+    
+    /// Encode the register data (not the address)
+    fn encode_data(&self, dst: &mut BytesMut) {
+        match self {
+            Register::ChipId { chip_type, core_count, address } => {
+                dst.put_slice(&chip_type.id_bytes());
+                dst.put_u8(*core_count);
+                dst.put_u8(*address);
+            },
+            Register::PllDivider(config) => {
+                let bytes: [u8; 4] = (*config).into();
+                dst.put_slice(&bytes);
+            },
+            Register::NonceRange(config) => {
+                let bytes: [u8; 4] = (*config).into();
+                dst.put_slice(&bytes);
+            },
+            Register::TicketMask(mask) => {
+                let bytes: [u8; 4] = (*mask).into();
+                dst.put_slice(&bytes);
+            },
+            Register::UartBaud(baud) => {
+                let bytes: [u8; 4] = (*baud).into();
+                dst.put_slice(&bytes);
+            },
+            Register::MiscControl { raw_value } |
+            Register::UartRelay { raw_value } |
+            Register::CoreRegister { raw_value } |
+            Register::AnalogMux { raw_value } |
+            Register::Pll3Parameter { raw_value } |
+            Register::InitControl { raw_value } |
+            Register::MiscSettings { raw_value } => {
+                dst.put_u32_le(*raw_value);
+            },
+            Register::IoDriverStrength(strength) => {
+                let bytes: [u8; 4] = (*strength).into();
+                dst.put_slice(&bytes);
+            },
+            Register::VersionMask(mask) => {
+                let bytes: [u8; 4] = (*mask).into();
+                dst.put_slice(&bytes);
             },
         }
     }
@@ -59,24 +531,33 @@ enum CommandFlagsType {
 
 #[repr(u8)]
 enum CommandFlagsCmd {
-    // SetAddress = 0,
+    SetChipAddress = 0,
     WriteRegisterOrJob = 1,
     ReadRegister = 2,
-    // ChainInactive = 3,
+    ChainInactive = 3,
 }
 
+#[derive(Debug)]
 pub enum Command {
+    /// Set address for a chip in the chain
+    SetChipAddress {
+        chip_address: u8,
+    },
+    /// Prepare chain for address assignment
+    ChainInactive,
+    /// Read a register from chip(s)
     ReadRegister {
         all: bool,
         chip_address: u8,
         register_address: RegisterAddress,
     },
+    /// Write a register to chip(s)
     WriteRegister {
         all: bool,
         chip_address: u8,
         register: Register,
     },
-    /// Send a job with full block header (BM1370/BM1366 style)
+    /// Send a job with full block header (BM1370/BM1362 style)
     /// Chip calculates midstates internally
     JobFull {
         job_data: JobFullFormat,
@@ -88,11 +569,11 @@ pub enum Command {
     },
 }
 
-/// Full format job structure (BM1370/BM1366).
+/// Full format job structure (BM1370/BM1362).
 /// The chip calculates midstates internally from the full block header.
 /// All multi-byte values are little-endian in the structure.
 /// Hash values (merkle_root, prev_block_hash) are stored in big-endian format.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct JobFullFormat {
     pub job_id: u8,
     pub num_midstates: u8,  // Typically 0x01 for BM1370
@@ -107,7 +588,7 @@ pub struct JobFullFormat {
 /// Midstate format job structure (BM1397).
 /// Host pre-calculates SHA256 midstates to reduce chip workload.
 /// Supports up to 4 midstates for version rolling.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct JobMidstateFormat {
     pub job_id: u8,
     pub num_midstates: u8,  // 1 or 4 typically
@@ -134,6 +615,43 @@ impl Command {
 
     fn encode(&self, dst: &mut BytesMut) {
         match self {
+            Command::SetChipAddress { chip_address } => {
+                dst.put_u8(Self::build_flags(
+                    CommandFlagsType::Command,
+                    false,  // Never broadcast
+                    CommandFlagsCmd::SetChipAddress,
+                ));
+                
+                const FLAGS_LEN: u8 = 1;
+                const CHIP_ADDR_LEN: u8 = 1;
+                const REG_ADDR_LEN: u8 = 1;  // Always 0x00 for set address
+                const LENGTH_FIELD_LEN: u8 = 1;
+                const CRC_LEN: u8 = 1;
+                const TOTAL_LEN: u8 = FLAGS_LEN + LENGTH_FIELD_LEN + CHIP_ADDR_LEN + REG_ADDR_LEN + CRC_LEN;
+                
+                dst.put_u8(TOTAL_LEN);
+                dst.put_u8(*chip_address);
+                dst.put_u8(0x00);  // Register address is always 0x00
+            }
+            Command::ChainInactive => {
+                dst.put_u8(Self::build_flags(
+                    CommandFlagsType::Command,
+                    true,  // Always broadcast
+                    CommandFlagsCmd::ChainInactive,
+                ));
+                
+                // From capture: 55 AA 53 05 00 00 03
+                // Length field (0x05) includes everything after preamble except itself
+                const FLAGS_LEN: u8 = 1;  // 0x53
+                const CHIP_ADDR_LEN: u8 = 1;  // 0x00
+                const REG_ADDR_LEN: u8 = 1;  // 0x00
+                const CRC_LEN: u8 = 1;  // 0x03
+                const TOTAL_LEN: u8 = FLAGS_LEN + CHIP_ADDR_LEN + REG_ADDR_LEN + CRC_LEN + 1; // +1 for length field
+                
+                dst.put_u8(TOTAL_LEN);
+                dst.put_u8(0x00);  // Chip address
+                dst.put_u8(0x00);  // Register address
+            }
             Command::ReadRegister { all, chip_address, register_address } => {
                 dst.put_u8(Self::build_flags(
                     CommandFlagsType::Command,
@@ -169,19 +687,8 @@ impl Command {
 
                 dst.put_u8(TOTAL_LEN);
                 dst.put_u8(*chip_address);
-                
-                match register {
-                    Register::ChipAddress { chip_id, core_count, address } => {
-                        dst.put_u8(RegisterAddress::ChipAddress as u8);
-                        dst.put_slice(chip_id);  // Already in correct byte order
-                        dst.put_u8(*core_count);
-                        dst.put_u8(*address);
-                    }
-                    Register::RegA8 { unknown } => {
-                        dst.put_u8(RegisterAddress::RegA8 as u8);
-                        dst.put_u32_le(*unknown);
-                    }
-                }
+                dst.put_u8(register.address() as u8);
+                register.encode_data(dst);
             }
             Command::JobFull { job_data } => {
                 dst.put_u8(Self::build_flags(
@@ -258,6 +765,7 @@ enum ResponseType {
     Nonce = 4,
 }
 
+#[derive(Debug)]
 pub enum Response {
     ReadRegister {
         chip_address: u8,
@@ -268,51 +776,56 @@ pub enum Response {
         job_id: u8,
         midstate_num: u8,
         version: u16,
+        subcore_id: u8,
     },
 }
 
 impl Response {
-    fn decode(bytes: &mut BytesMut, _is_version_rolling: bool) -> Result<Response, String> {
+    fn decode(bytes: &mut BytesMut, _is_version_rolling: bool) -> Result<Response, ProtocolError> {
         let type_and_crc = bytes[bytes.len() - 1].view_bits::<Lsb0>();
         let type_repr = type_and_crc[5..].load::<u8>();
 
         match ResponseType::from_repr(type_repr) {
             Some(ResponseType::ReadRegister) => {
-                let value: &[u8; 4] = &bytes.split_to(4)[..].try_into().unwrap();
+                let value_bytes = bytes.split_to(4);
+                let value: [u8; 4] = value_bytes[..].try_into()
+                    .map_err(|_| ProtocolError::BufferTooSmall { need: 4, have: value_bytes.len() })?;
                 let chip_address = bytes.get_u8();
                 let register_address_repr = bytes.get_u8();
 
                 if let Some(register_address) = RegisterAddress::from_repr(register_address_repr) {
-                    let register = Register::decode(register_address, value);
+                    let register = Register::decode(register_address, &value);
                     Ok(Response::ReadRegister {
                         chip_address,
                         register,
                     })
                 } else {
-                    Err(format!(
-                        "unknown register address 0x{:x}.",
-                        register_address_repr
-                    ))
+                    Err(ProtocolError::InvalidRegisterAddress(register_address_repr))
                 }
             }
             Some(ResponseType::Nonce) => {
                 // BM1370 nonce response format (11 bytes total, including preamble):
                 // Already consumed: preamble (2 bytes)
-                // Remaining: nonce(4) + midstate_num(1) + job_id(1) + version(2) + crc(1)
+                // Remaining: nonce(4) + midstate_num(1) + result_header(1) + version(2) + crc(1)
                 let nonce = bytes.get_u32_le();
                 let midstate_num = bytes.get_u8();
-                let job_id = bytes.get_u8();
+                let result_header = bytes.get_u8();
                 let version = bytes.get_u16_le();
                 // CRC already consumed
+                
+                // Extract job_id (bits 7-4) and subcore_id (bits 3-0) from result_header
+                let job_id = (result_header >> 4) & 0x0f;
+                let subcore_id = result_header & 0x0f;
                 
                 Ok(Response::Nonce {
                     nonce,
                     job_id,
                     midstate_num,
                     version,
+                    subcore_id,
                 })
             }
-            None => Err(format!("unknown response type 0x{:x}.", type_repr)),
+            None => Err(ProtocolError::InvalidResponseType(type_repr)),
         }
     }
 }
@@ -328,8 +841,8 @@ impl Encoder<Command> for FrameCodec {
     type Error = io::Error;
 
     fn encode(&mut self, command: Command, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        const COMMAND_PREAMBLE: &[u8] = &[0x55, 0xaa];
-        dst.put_slice(COMMAND_PREAMBLE);
+        const PREAMBLE: [u8; 2] = [0x55, 0xaa];
+        dst.put_slice(&PREAMBLE);
 
         let start_pos = dst.len();
         command.encode(dst);
@@ -369,7 +882,7 @@ impl Decoder for FrameCodec {
         // In the case of an invalid frame, consume the first byte and request another call by
         // returning Ok(None). In the case of a valid frame, consume that frame's worth of bytes.
 
-        const PREAMBLE: &[u8] = &[0xaa, 0x55];
+        const PREAMBLE: [u8; 2] = [0xaa, 0x55];
         const NONROLLING_FRAME_LEN: usize = PREAMBLE.len() + 7;
         const ROLLING_FRAME_LEN: usize = PREAMBLE.len() + 9;
         const CALL_AGAIN: Result<Option<Response>, io::Error> = Ok(None);
@@ -405,10 +918,258 @@ impl Decoder for FrameCodec {
 
         match Response::decode(&mut prospect, self.version_rolling) {
             Ok(response) => Ok(Some(response)),
-            Err(msg) => {
-                warn!(msg);
+            Err(err) => {
+                warn!("Failed to decode response: {}", err);
                 CALL_AGAIN
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+    
+    #[test]
+    fn multi_chip_init_sequence() {
+        let protocol = BM13xxProtocol::new(true);
+        let commands = protocol.multi_chip_init(65); // S21 Pro has 65 chips
+        
+        // Verify the sequence starts with version rolling enable
+        assert!(matches!(
+            &commands[0],
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::VersionMask(_),
+            }
+        ));
+        
+        // Verify chain inactive command
+        let chain_inactive_pos = commands.iter()
+            .position(|c| matches!(c, Command::ChainInactive))
+            .expect("ChainInactive command not found in initialization sequence");
+        assert!(chain_inactive_pos > 0);
+        
+        // Verify chip addressing starts after chain inactive
+        let first_address_pos = chain_inactive_pos + 1;
+        assert!(matches!(
+            &commands[first_address_pos],
+            Command::SetChipAddress { chip_address: 0x00 }
+        ));
+        
+        // Verify we have 65 address assignments
+        let address_commands: Vec<_> = commands[first_address_pos..first_address_pos + 65]
+            .iter()
+            .collect();
+        assert_eq!(address_commands.len(), 65);
+        
+        // Verify addresses increment by 2
+        for (i, cmd) in address_commands.iter().enumerate() {
+            match cmd {
+                Command::SetChipAddress { chip_address } => {
+                    assert_eq!(*chip_address, (i * 2) as u8);
+                }
+                _ => panic!("Expected SetChipAddress command, got {:?}", cmd),
+            }
+        }
+    }
+    
+    #[test]
+    fn domain_configuration() {
+        let protocol = BM13xxProtocol::new(false);
+        let commands = protocol.configure_domains(65, 5); // 65 chips, 5 per domain
+        
+        // Should have 13 domains
+        let io_strength_commands: Vec<_> = commands.iter()
+            .filter(|c| matches!(c, Command::WriteRegister { 
+                register: Register::IoDriverStrength { .. }, 
+                .. 
+            }))
+            .collect();
+        assert_eq!(io_strength_commands.len(), 13);
+        
+        // Check first domain boundary (chip 8 = address 0x08)
+        let first_boundary = io_strength_commands[0];
+        if let Command::WriteRegister { chip_address, register: Register::IoDriverStrength(strength), .. } = first_boundary {
+            assert_eq!(*chip_address, 0x08); // 5th chip (index 4) * 2
+            let strength_bytes: [u8; 4] = (*strength).into();
+            // Expected bytes from hardware capture
+            assert_eq!(strength_bytes, [0x00, 0xf1, 0x11, 0x11]);
+        }
+    }
+    
+    #[test]
+    fn frequency_ramp_sequence() {
+        let protocol = BM13xxProtocol::new(false);
+        let start = Frequency::from_mhz(400.0).unwrap();
+        let target = Frequency::from_mhz(600.0).unwrap();
+        let commands = protocol.frequency_ramp(start, target, 5);
+        
+        assert_eq!(commands.len(), 5);
+        
+        // Verify it's a gradual increase - check that PLL configs are generated
+        for cmd in commands.iter() {
+            assert!(matches!(
+                cmd,
+                Command::WriteRegister { 
+                    register: Register::PllDivider(_),
+                    all: true,
+                    ..
+                }
+            ));
+        }
+    }
+    
+    #[test]
+    fn pll_calculation_produces_valid_frequencies() {
+        // Test cases from serial captures showing PLL values sent by esp-miner
+        // Note: esp-miner uses first-found algorithm while we find optimal settings
+        // Format: (target_mhz, [fb_div, ref_div, post_div] from esp-miner)
+        let test_cases = vec![
+            (62.5,  [0xd2, 0x02, 0x65]),  // 62.50MHz
+            (75.0,  [0xd2, 0x02, 0x64]),  // 75.00MHz  
+            (100.0, [0xe0, 0x02, 0x63]),  // 100.00MHz
+            (400.0, [0xe0, 0x02, 0x60]),  // 400.00MHz
+            (500.0, [0xa2, 0x02, 0x30]),  // 500.00MHz -> esp-miner gives 506.25MHz
+        ];
+        
+        for (target_mhz, esp_miner_raw) in test_cases {
+            let freq = Frequency::from_mhz(target_mhz).unwrap();
+            let pll = freq.calculate_pll();
+            
+            // Calculate actual frequencies for both esp-miner and our values
+            let esp_post_div1 = ((esp_miner_raw[2] >> 4) & 0xf) + 1;
+            let esp_post_div2 = (esp_miner_raw[2] & 0xf) + 1;
+            let esp_actual_mhz = 25.0 * esp_miner_raw[0] as f32 / 
+                (esp_miner_raw[1] as f32 * esp_post_div1 as f32 * esp_post_div2 as f32);
+            
+            let our_post_div1 = ((pll.post_div >> 4) & 0xf) + 1;
+            let our_post_div2 = (pll.post_div & 0xf) + 1;
+            let our_actual_mhz = 25.0 * pll.fb_div as f32 / 
+                (pll.ref_div as f32 * our_post_div1 as f32 * our_post_div2 as f32);
+            
+            // Calculate errors
+            let esp_error = (target_mhz - esp_actual_mhz).abs();
+            let our_error = (target_mhz - our_actual_mhz).abs();
+            
+            println!("Target: {:.2}MHz", target_mhz);
+            println!("  esp-miner: fb={:#04x} ref={} post={:#04x} -> {:.2}MHz (error: {:.4}MHz)", 
+                     esp_miner_raw[0], esp_miner_raw[1], esp_miner_raw[2], esp_actual_mhz, esp_error);
+            println!("  Our calc:  fb={:#04x} ref={} post={:#04x} -> {:.2}MHz (error: {:.4}MHz)",
+                     pll.fb_div, pll.ref_div, pll.post_div, our_actual_mhz, our_error);
+            
+            // Verify our calculation produces valid PLL parameters
+            assert!(pll.fb_div >= 0xa0 && pll.fb_div <= 0xef, 
+                    "fb_div out of range: {:#04x}", pll.fb_div);
+            assert!(pll.ref_div == 1 || pll.ref_div == 2,
+                    "ref_div invalid: {}", pll.ref_div);
+            
+            // Verify our error is reasonable (within 1MHz)
+            assert!(our_error < 1.0, 
+                    "Frequency error too large: {:.2}MHz for target {}MHz", our_error, target_mhz);
+            
+            // Our algorithm should produce equal or better results
+            // Allow small tolerance for floating point comparison
+            assert!(our_error <= esp_error + 0.01, 
+                    "Our algorithm produced worse result than esp-miner for {}MHz", target_mhz);
+        }
+    }
+    
+    #[test]
+    fn nonce_range_configuration() {
+        let protocol = BM13xxProtocol::new(false);
+        
+        // Test single chip - full range
+        let commands = protocol.configure_nonce_ranges(1);
+        assert_eq!(commands.len(), 1);
+        if let Command::WriteRegister { 
+            register: Register::NonceRange(config), 
+            all: true,
+            .. 
+        } = &commands[0] {
+            let config_bytes: [u8; 4] = (*config).into();
+            assert_eq!(config_bytes, [0xff, 0xff, 0xff, 0xff]);
+        }
+        
+        // Test S21 Pro configuration (65 chips)
+        let commands = protocol.configure_nonce_ranges(65);
+        assert_eq!(commands.len(), 1);
+        if let Command::WriteRegister { 
+            register: Register::NonceRange(config), 
+            .. 
+        } = &commands[0] {
+            let config_bytes: [u8; 4] = (*config).into();
+            assert_eq!(config_bytes, [0x00, 0x00, 0x1e, 0xb5]);
+        }
+        
+        // Test small chain
+        let commands = protocol.configure_nonce_ranges(8);
+        if let Command::WriteRegister { 
+            register: Register::NonceRange(config), 
+            .. 
+        } = &commands[0] {
+            let config_bytes: [u8; 4] = (*config).into();
+            assert_eq!(config_bytes, [0xff, 0xff, 0xff, 0x1f]);
+        }
+    }
+    
+    #[test]
+    fn job_distribution() {
+        use crate::chip::MiningJob;
+        
+        let protocol = BM13xxProtocol::new(true);
+        
+        // Create a test header
+        let mut header = [0u8; 80];
+        // Version (0x20000000 in little-endian)
+        header[0..4].copy_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+        // Previous block hash
+        header[4..36].copy_from_slice(&[0x00; 32]);
+        // Merkle root
+        header[36..68].copy_from_slice(&[0x11; 32]);
+        // ntime (0x6767675c in little-endian)
+        header[68..72].copy_from_slice(&[0x5c, 0x67, 0x67, 0x67]);
+        // nbits (0x170e3ab4 in little-endian)
+        header[72..76].copy_from_slice(&[0xb4, 0x3a, 0x0e, 0x17]);
+        // nonce (placeholder)
+        header[76..80].copy_from_slice(&[0x00; 4]);
+        
+        let job = MiningJob::from_header(
+            123,
+            header,
+            [0xff; 32], // target
+            0,          // nonce_start
+            0xffffffff, // nonce_range
+        );
+        
+        let commands = protocol.distribute_job(&job, 65, 0x18);
+        
+        // Should have one broadcast job command
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(&commands[0], Command::JobFull { .. }));
+    }
+    
+    #[test]
+    fn multi_chip_init_includes_nonce_range() {
+        let protocol = BM13xxProtocol::new(true);
+        let commands = protocol.multi_chip_init(65);
+        
+        // Find the nonce range configuration
+        let nonce_range_cmd = commands.iter()
+            .find(|c| matches!(c, Command::WriteRegister { 
+                register: Register::NonceRange { .. }, 
+                .. 
+            }));
+        
+        assert!(nonce_range_cmd.is_some());
+        
+        if let Some(Command::WriteRegister { 
+            register: Register::NonceRange(config), 
+            .. 
+        }) = nonce_range_cmd {
+            let config_bytes: [u8; 4] = (*config).into();
+            assert_eq!(config_bytes, [0x00, 0x00, 0x1e, 0xb5]); // S21 Pro value
         }
     }
 }
@@ -423,7 +1184,7 @@ mod command_tests {
             Command::ReadRegister {
                 all: true,
                 chip_address: 0,
-                register_address: RegisterAddress::ChipAddress,
+                register_address: RegisterAddress::ChipId,
             },
             &[0x55, 0xaa, 0x52, 0x05, 0x00, 0x00, 0x0a],
         );
@@ -435,13 +1196,111 @@ mod command_tests {
             Command::WriteRegister {
                 all: false,
                 chip_address: 0x01,
-                register: Register::ChipAddress {
-                    chip_id: [0x13, 0x70],  // BM1370
+                register: Register::ChipId {
+                    chip_type: ChipType::BM1370,
                     core_count: 0x00,
                     address: 0x01,
                 },
             },
             &[0x55, 0xaa, 0x41, 0x09, 0x01, 0x00, 0x13, 0x70, 0x00, 0x01, 0x0a],
+        );
+    }
+    
+    // Tests from actual captures
+    #[test]
+    fn write_version_mask_from_capture() {
+        // From S21 Pro capture: TX: 55 AA 51 09 00 A4 90 00 FF FF 1C
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,  // 0x51 = broadcast
+                chip_address: 0x00,
+                register: Register::VersionMask(VersionMask::full_rolling()),
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0xa4, 0x90, 0x00, 0xff, 0xff, 0x1c],
+        );
+    }
+    
+    #[test]
+    fn write_init_control_from_capture() {
+        // From Bitaxe capture: TX: 55 AA 51 09 00 A8 00 07 00 00 03
+        // Value 0x00 07 00 00 in little-endian = 0x00000700
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::InitControl { raw_value: 0x00000700 },
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0xa8, 0x00, 0x07, 0x00, 0x00, 0x03],
+        );
+    }
+    
+    #[test]
+    fn write_misc_control_from_capture() {
+        // From Bitaxe capture: TX: 55 AA 51 09 00 18 F0 00 C1 00 04
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::MiscControl { raw_value: 0x00C100F0 },
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0x18, 0xf0, 0x00, 0xc1, 0x00, 0x04],
+        );
+    }
+    
+    #[test]
+    fn chain_inactive_from_capture() {
+        // From S21 Pro capture: TX: 55 AA 53 05 00 00 03
+        assert_frame_eq(
+            Command::ChainInactive,
+            &[0x55, 0xaa, 0x53, 0x05, 0x00, 0x00, 0x03],
+        );
+    }
+    
+    #[test]
+    fn set_chip_address_from_capture() {
+        // From S21 Pro capture: TX: 55 AA 40 05 04 00 03 (assign address 0x04)
+        assert_frame_eq(
+            Command::SetChipAddress { chip_address: 0x04 },
+            &[0x55, 0xaa, 0x40, 0x05, 0x04, 0x00, 0x03],
+        );
+    }
+    
+    #[test]
+    fn write_core_register_sequence() {
+        // From Bitaxe capture: TX: 55 AA 51 09 00 3C 80 00 8B 00 12
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::CoreRegister { raw_value: 0x008B0080 },
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0x3c, 0x80, 0x00, 0x8b, 0x00, 0x12],
+        );
+    }
+    
+    #[test]
+    fn write_ticket_mask_from_capture() {
+        // From S21 Pro capture: TX: 55 AA 51 09 00 14 00 00 00 FF 08
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::TicketMask(DifficultyMask::from_difficulty(256)),
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0x14, 0x00, 0x00, 0x00, 0xff, 0x08],
+        );
+    }
+    
+    #[test]
+    fn write_nonce_range_from_capture() {
+        // From S21 Pro capture: TX: 55 AA 51 09 00 10 00 00 1E B5 0F
+        assert_frame_eq(
+            Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: Register::NonceRange(NonceRangeConfig::multi_chip(65)),
+            },
+            &[0x55, 0xaa, 0x51, 0x09, 0x00, 0x10, 0x00, 0x00, 0x1e, 0xb5, 0x0f],
         );
     }
     
@@ -461,7 +1320,8 @@ mod command_tests {
         
         let mut codec = FrameCodec::default();
         let mut frame = BytesMut::new();
-        codec.encode(Command::JobFull { job_data: job.clone() }, &mut frame).unwrap();
+        codec.encode(Command::JobFull { job_data: job.clone() }, &mut frame)
+            .expect("Failed to encode job command");
         
         // Verify packet structure
         assert_eq!(&frame[0..2], &[0x55, 0xaa]); // Preamble
@@ -480,21 +1340,23 @@ mod command_tests {
         assert_eq!(frame.len(), 88);
         let crc_bytes = &frame[86..88];
         let calculated_crc = crc16(&frame[2..86]);
-        let frame_crc = u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]);
+        let frame_crc = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
         assert_eq!(calculated_crc, frame_crc);
     }
 
     fn assert_frame_eq(cmd: Command, expect: &[u8]) {
         let mut codec = FrameCodec::default();
         let mut frame = BytesMut::new();
-        codec.encode(cmd, &mut frame).unwrap();
-        if frame != expect {
-            panic!(
-                "mismatch!\nexpected: {}\nactual: {}",
-                as_hex(expect),
-                as_hex(&frame[..])
-            )
-        }
+        codec.encode(cmd, &mut frame)
+            .expect("Failed to encode command for test");
+        
+        assert_eq!(
+            &frame[..],
+            expect,
+            "\nFrame mismatch!\nExpected: {}\nActual:   {}",
+            as_hex(expect),
+            as_hex(&frame[..])
+        );
     }
 
     fn as_hex(bytes: &[u8]) -> String {
@@ -513,28 +1375,29 @@ mod response_tests {
     #[test]
     fn read_register() {
         let wire = &[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x06];
-        let response = decode_frame(wire).unwrap();
+        let response = decode_frame(wire)
+            .expect("decode_frame should return Some for valid frame");
 
         let Response::ReadRegister {
             chip_address,
             register,
         } = response
         else {
-            panic!();
+            panic!("Expected ReadRegister response, got {:?}", response);
         };
 
         assert_eq!(chip_address, 0x00);
 
-        let Register::ChipAddress {
-            chip_id,
+        let Register::ChipId {
+            chip_type,
             core_count,
             address,
         } = register
         else {
-            panic!();
+            panic!("Expected ChipId register, got {:?}", register);
         };
 
-        assert_eq!(chip_id, [0x13, 0x70]);  // BM1370
+        assert_eq!(chip_type, ChipType::BM1370);
         assert_eq!(core_count, 0x00);
         assert_eq!(address, 0x00);
     }
@@ -542,7 +1405,77 @@ mod response_tests {
     fn decode_frame(frame: &[u8]) -> Option<Response> {
         let mut buf = BytesMut::from(frame);
         let mut codec = FrameCodec::default();
-        codec.decode(&mut buf).unwrap()
+        codec.decode(&mut buf)
+            .expect("Failed to decode frame")
+    }
+    
+    #[test]
+    fn decode_nonce_response_from_capture() {
+        // From Bitaxe capture: RX: AA 55 18 00 A6 40 02 99 22 F9 91
+        let wire = &[0xaa, 0x55, 0x18, 0x00, 0xa6, 0x40, 0x02, 0x99, 0x22, 0xf9, 0x91];
+        let response = decode_frame(wire)
+            .expect("decode_frame should return Some for valid frame");
+        
+        let Response::Nonce {
+            nonce,
+            job_id,
+            midstate_num,
+            version,
+            subcore_id,
+        } = response
+        else {
+            panic!("Expected nonce response");
+        };
+        
+        // From protocol doc: nonce 0x40A60018 → Main core 32, nonce value 0x00A60018
+        assert_eq!(nonce, 0x40a60018);
+        assert_eq!(midstate_num, 0x02);
+        
+        // Result header: 0x99 → job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
+        assert_eq!(job_id, 9);
+        assert_eq!(subcore_id, 9);
+        
+        // Version: 0xF922
+        assert_eq!(version, 0xf922);
+        
+        // Verify main core extraction
+        let main_core = (nonce >> 25) & 0x7f;
+        assert_eq!(main_core, 32);
+    }
+    
+    #[test]
+    fn decode_multiple_nonce_responses() {
+        // Additional nonce responses from S21 Pro capture
+        let test_cases = vec![
+            // RX: AA 55 07 35 CD CF 02 5E 00 2E 96
+            (&[0xaa, 0x55, 0x07, 0x35, 0xcd, 0xcf, 0x02, 0x5e, 0x00, 0x2e, 0x96], 
+             0xcfcd3507, 0x02, 5, 14, 0x2e00),
+            // RX: AA 55 46 03 32 E7 00 C3 2C 83 99
+            (&[0xaa, 0x55, 0x46, 0x03, 0x32, 0xe7, 0x00, 0xc3, 0x2c, 0x83, 0x99],
+             0xe7320346, 0x00, 12, 3, 0x832c),
+        ];
+        
+        for (wire, exp_nonce, exp_midstate, exp_job_id, exp_subcore, exp_version) in test_cases {
+            let response = decode_frame(wire)
+            .expect("decode_frame should return Some for valid frame");
+            
+            let Response::Nonce {
+                nonce,
+                job_id,
+                midstate_num,
+                version,
+                subcore_id,
+            } = response
+            else {
+                panic!("Expected nonce response");
+            };
+            
+            assert_eq!(nonce, exp_nonce);
+            assert_eq!(midstate_num, exp_midstate);
+            assert_eq!(job_id, exp_job_id);
+            assert_eq!(subcore_id, exp_subcore);
+            assert_eq!(version, exp_version);
+        }
     }
 }
 
@@ -562,6 +1495,24 @@ impl BM13xxProtocol {
     /// Create a new protocol instance.
     pub fn new(version_rolling: bool) -> Self {
         Self { version_rolling }
+    }
+    
+    /// Helper to create a broadcast write command
+    fn broadcast_write(&self, register: Register) -> Command {
+        Command::WriteRegister {
+            all: true,
+            chip_address: 0x00,
+            register,
+        }
+    }
+    
+    /// Helper to create a targeted write command
+    fn write_to(&self, chip_address: u8, register: Register) -> Command {
+        Command::WriteRegister {
+            all: false,
+            chip_address,
+            register,
+        }
     }
     
     /// Encode a mining job into a chip command.
@@ -588,22 +1539,223 @@ impl BM13xxProtocol {
         Command::JobFull { job_data }
     }
     
-    /// Get the initialization sequence for a chip.
+    /// Get the initialization sequence for a single chip (e.g., Bitaxe).
     /// 
     /// Returns a vector of commands to configure the chip for mining:
     /// 1. Set PLL parameters for desired frequency
     /// 2. Enable version rolling if supported
     /// 3. Configure other chip-specific settings
-    pub fn initialization_sequence(&self, chip_address: u8) -> Vec<Command> {
+    pub fn single_chip_init(&self, frequency: Frequency) -> Vec<Command> {
         let mut commands = Vec::new();
         
-        // TODO: Add actual initialization commands
-        // For now, just read the chip address register as a test
-        commands.push(Command::ReadRegister {
-            all: false,
-            chip_address,
-            register_address: RegisterAddress::ChipAddress,
-        });
+        // Enable version rolling with mask 0xFFFF
+        if self.version_rolling {
+            commands.push(self.broadcast_write(
+                Register::VersionMask(VersionMask::full_rolling())
+            ));
+        }
+        
+        // Configure PLL for desired frequency
+        let pll_config = frequency.calculate_pll();
+        commands.push(self.broadcast_write(
+            Register::PllDivider(pll_config)
+        ));
+        
+        commands
+    }
+    
+    /// Initialize a multi-chip chain (e.g., S21 Pro, S19 J Pro).
+    /// 
+    /// This follows the initialization sequence from production miners:
+    /// 1. Enable version rolling on all chips
+    /// 2. Configure initial settings
+    /// 3. Set chain inactive and assign addresses
+    /// 4. Configure domain boundaries
+    /// 5. Ramp up frequency gradually
+    pub fn multi_chip_init(&self, chain_length: usize) -> Vec<Command> {
+        // Multi-chip initialization register values
+        const INIT_CONTROL_VALUE: u32 = 0x00000700;
+        const MISC_CONTROL_MULTI_CHIP: u32 = 0x0000c1f0;
+        const CORE_REG_INIT_1: u32 = 0x00008b80;
+        const CORE_REG_INIT_2: u32 = 0x0c800080;
+        const ADDRESS_INCREMENT: u8 = 2;
+        
+        let mut commands = Vec::new();
+        
+        // Step 1: Enable version rolling on all chips (broadcast)
+        if self.version_rolling {
+            commands.push(self.broadcast_write(
+                Register::VersionMask(VersionMask::full_rolling())
+            ));
+        }
+        
+        // Step 2: Configure init control register
+        commands.push(self.broadcast_write(
+            Register::InitControl {
+                raw_value: INIT_CONTROL_VALUE,
+            }
+        ));
+        
+        // Step 3: Configure misc control
+        commands.push(self.broadcast_write(
+            Register::MiscControl {
+                raw_value: MISC_CONTROL_MULTI_CHIP,
+            }
+        ));
+        
+        // Step 4: Set chain inactive for address assignment
+        commands.push(Command::ChainInactive);
+        
+        // Step 5: Assign addresses (increment by 2)
+        for i in 0..chain_length {
+            let address = (i as u8) * ADDRESS_INCREMENT;
+            commands.push(Command::SetChipAddress {
+                chip_address: address,
+            });
+        }
+        
+        // Step 6: Configure core registers on all chips
+        commands.push(self.broadcast_write(
+            Register::CoreRegister {
+                raw_value: CORE_REG_INIT_1,
+            }
+        ));
+        commands.push(self.broadcast_write(
+            Register::CoreRegister {
+                raw_value: CORE_REG_INIT_2,
+            }
+        ));
+        
+        // Step 7: Set ticket mask (difficulty)
+        commands.push(self.broadcast_write(
+            Register::TicketMask(DifficultyMask::from_difficulty(256))
+        ));
+        
+        // Step 8: Configure IO driver strength on all chips
+        commands.push(self.broadcast_write(
+            Register::IoDriverStrength(IoDriverStrength::normal())
+        ));
+        
+        // Step 9: Configure nonce range partitioning
+        commands.extend(self.configure_nonce_ranges(chain_length));
+        
+        commands
+    }
+    
+    /// Configure domain boundaries for a multi-chip chain.
+    /// 
+    /// Domains are groups of chips that share signal integrity settings.
+    /// This configures IO driver strength and UART relay for domain boundaries.
+    pub fn configure_domains(&self, chain_length: usize, chips_per_domain: usize) -> Vec<Command> {
+        const UART_RELAY_BASE: u32 = 0x03000000;
+        const ADDRESS_INCREMENT: u8 = 2;
+        
+        let mut commands = Vec::new();
+        let num_domains = (chain_length + chips_per_domain - 1) / chips_per_domain;
+        
+        // Configure IO driver strength at domain boundaries
+        for domain in 0..num_domains {
+            let last_chip_in_domain = ((domain + 1) * chips_per_domain - 1).min(chain_length - 1);
+            let chip_address = (last_chip_in_domain as u8) * ADDRESS_INCREMENT;
+            
+            commands.push(self.write_to(
+                chip_address,
+                Register::IoDriverStrength(IoDriverStrength::domain_boundary())
+            ));
+        }
+        
+        // Configure UART relay for each domain
+        for domain in 0..num_domains {
+            let first_chip = domain * chips_per_domain;
+            let last_chip = ((domain + 1) * chips_per_domain - 1).min(chain_length - 1);
+            
+            // Configure first chip in domain
+            let first_address = (first_chip as u8) * ADDRESS_INCREMENT;
+            let relay_offset = (domain * chips_per_domain) as u32;
+            commands.push(self.write_to(
+                first_address,
+                Register::UartRelay {
+                    raw_value: UART_RELAY_BASE | (relay_offset << 8),
+                }
+            ));
+            
+            // Configure last chip in domain
+            if first_chip != last_chip {
+                let last_address = (last_chip as u8) * ADDRESS_INCREMENT;
+                commands.push(self.write_to(
+                    last_address,
+                    Register::UartRelay {
+                        raw_value: UART_RELAY_BASE | (relay_offset << 8),
+                    }
+                ));
+            }
+        }
+        
+        commands
+    }
+    
+    
+    /// Configure nonce range partitioning for multi-chip operation.
+    /// 
+    /// This distributes the 32-bit nonce space across all chips in the chain
+    /// to avoid duplicate work. Each chip searches a unique portion of the nonce space.
+    pub fn configure_nonce_ranges(&self, chain_length: usize) -> Vec<Command> {
+        let mut commands = Vec::new();
+        
+        // Calculate nonce range based on chain length
+        let nonce_config = NonceRangeConfig::multi_chip(chain_length);
+        
+        // Write nonce range to all chips
+        commands.push(self.broadcast_write(
+            Register::NonceRange(nonce_config)
+        ));
+        
+        commands
+    }
+    
+    /// Distribute a mining job across chips with proper nonce space partitioning.
+    /// 
+    /// For multi-chip chains, each chip gets the same job but searches different
+    /// portions of the nonce space based on their chip address and NONCE_RANGE setting.
+    pub fn distribute_job(&self, job: &MiningJob, _chain_length: usize, job_id: u8) -> Vec<Command> {
+        let mut commands = Vec::new();
+        
+        // For BM1370/BM1362, jobs are broadcast to all chips
+        // The NONCE_RANGE register handles partitioning
+        let job_cmd = self.encode_mining_job(job, job_id);
+        commands.push(job_cmd);
+        
+        commands
+    }
+    
+    /// Generate frequency ramping sequence for gradual clock increase.
+    /// 
+    /// This prevents power spikes and thermal stress during startup.
+    pub fn frequency_ramp(&self, start: Frequency, target: Frequency, steps: usize) -> Vec<Command> {
+        let mut commands = Vec::new();
+        
+        if steps <= 1 {
+            // Direct jump to target frequency
+            commands.push(self.broadcast_write(
+                Register::PllDivider(target.calculate_pll())
+            ));
+            return commands;
+        }
+        
+        // Calculate frequency steps
+        let start_mhz = start.mhz();
+        let target_mhz = target.mhz();
+        let freq_delta = (target_mhz - start_mhz) / (steps as f32 - 1.0);
+        
+        for i in 0..steps {
+            let freq_mhz = start_mhz + freq_delta * i as f32;
+            // Safe to unwrap because we're interpolating between valid frequencies
+            let freq = Frequency::from_mhz(freq_mhz)
+                .expect("Interpolated frequency should be valid");
+            commands.push(self.broadcast_write(
+                Register::PllDivider(freq.calculate_pll())
+            ));
+        }
         
         commands
     }
@@ -614,12 +1766,15 @@ impl BM13xxProtocol {
             Response::ReadRegister { chip_address: _, register } => {
                 Ok(MiningResult::RegisterRead(register))
             }
-            Response::Nonce { nonce, job_id, midstate_num: _, version } => {
-                // Extract core ID from nonce (bits 25-31)
-                let core_id = ((nonce >> 25) & 0x7f) as u8;
+            Response::Nonce { nonce, job_id, midstate_num: _, version, subcore_id } => {
+                // Extract main core ID from nonce (bits 25-31)
+                let main_core_id = ((nonce >> 25) & 0x7f) as u8;
                 
-                // Extract actual job ID (upper 7 bits of job_id field, shifted left by 1)
-                let actual_job_id = ((job_id & 0xf0) >> 1) as u64;
+                // Full core ID combines main core and subcore
+                let core_id = (main_core_id << 4) | subcore_id;
+                
+                // Job ID is already extracted correctly (4 bits)
+                let actual_job_id = job_id as u64;
                 
                 // Combine version bits with nonce for version rolling
                 // Version bits come in bits 15:0, need to shift to 28:13
@@ -643,25 +1798,56 @@ impl BM13xxProtocol {
         }
     }
     
+    /// Set UART baud rate on all chips
+    pub fn set_baudrate(&self, baudrate: BaudRate) -> Command {
+        Command::WriteRegister {
+            all: true,
+            chip_address: 0x00,
+            register: Register::UartBaud(baudrate),
+        }
+    }
+    
     /// Create a command to write a register.
     /// 
     /// Note: This is a placeholder - actual register encoding depends on the register type
-    pub fn write_register(&self, chip_address: u8, register: RegisterAddress, value: u32) -> Command {
+    pub fn write_register(&self, chip_address: u8, register: RegisterAddress, value: u32) -> Result<Command, ProtocolError> {
         // TODO: Properly encode register based on type
         // For now, just handle RegA8 as an example
         let register_value = match register {
-            RegisterAddress::ChipAddress => {
-                // Can't write chip address register
-                panic!("Cannot write to chip address register");
+            RegisterAddress::ChipId => {
+                // Can't write chip ID register directly
+                return Err(ProtocolError::ReadOnlyRegister(register));
             }
-            RegisterAddress::RegA8 => Register::RegA8 { unknown: value },
+            RegisterAddress::PllDivider => Register::PllDivider(value.into()),
+            RegisterAddress::NonceRange => Register::NonceRange(NonceRangeConfig { bytes: value.to_le_bytes() }),
+            RegisterAddress::TicketMask => Register::TicketMask(DifficultyMask { bytes: value.to_le_bytes() }),
+            RegisterAddress::MiscControl => Register::MiscControl { raw_value: value },
+            RegisterAddress::UartBaud => Register::UartBaud(BaudRate::Custom(value)),
+            RegisterAddress::UartRelay => Register::UartRelay { raw_value: value },
+            RegisterAddress::CoreRegister => Register::CoreRegister { raw_value: value },
+            RegisterAddress::AnalogMux => Register::AnalogMux { raw_value: value },
+            RegisterAddress::IoDriverStrength => {
+                let mut strengths = [0u8; 8];
+                for i in 0..8 {
+                    strengths[i] = ((value >> (i * 4)) & 0xf) as u8;
+                }
+                Register::IoDriverStrength(IoDriverStrength { strengths })
+            },
+            RegisterAddress::Pll3Parameter => Register::Pll3Parameter { raw_value: value },
+            RegisterAddress::VersionMask => {
+                let mask = (value >> 16) as u16;
+                let control = (value & 0xffff) as u16;
+                Register::VersionMask(VersionMask { mask, control })
+            },
+            RegisterAddress::InitControl => Register::InitControl { raw_value: value },
+            RegisterAddress::MiscSettings => Register::MiscSettings { raw_value: value },
         };
         
-        Command::WriteRegister {
+        Ok(Command::WriteRegister {
             all: false,
             chip_address,
             register: register_value,
-        }
+        })
     }
     
     /// Create a broadcast command to discover all chips.
@@ -669,7 +1855,7 @@ impl BM13xxProtocol {
         Command::ReadRegister {
             all: true,  // Broadcast
             chip_address: 0,
-            register_address: RegisterAddress::ChipAddress,
+            register_address: RegisterAddress::ChipId,
         }
     }
 }

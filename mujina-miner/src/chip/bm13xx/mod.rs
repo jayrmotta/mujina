@@ -4,6 +4,7 @@
 //! communicating with BM13xx series mining chips (BM1366, BM1370, etc).
 
 pub mod protocol;
+pub mod error;
 pub(super) mod crc;  // Make visible to protocol module
 
 // Re-export commonly used types from protocol

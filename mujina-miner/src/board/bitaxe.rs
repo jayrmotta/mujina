@@ -118,9 +118,11 @@ impl BitaxeBoard {
                     match response {
                         Some(Ok(bm13xx::Response::ReadRegister {
                             chip_address: _,
-                            register: bm13xx::Register::ChipAddress { chip_id, core_count, address }
+                            register: bm13xx::Register::ChipId { chip_type, core_count, address }
                         })) => {
-                            tracing::info!("Discovered chip {:02x}{:02x} at address {address} with {core_count} cores", chip_id[0], chip_id[1]);
+                            let chip_id = chip_type.id_bytes();
+                            tracing::info!("Discovered chip {:?} ({:02x}{:02x}) at address {address}", 
+                                         chip_type, chip_id[0], chip_id[1]);
                             
                             let chip_info = ChipInfo {
                                 chip_id,
@@ -194,16 +196,13 @@ impl BitaxeBoard {
                 match reader.next().await {
                     Some(Ok(response)) => {
                         match response {
-                            bm13xx::Response::Nonce { nonce, job_id, midstate_num: _, version } => {
+                            bm13xx::Response::Nonce { nonce, job_id, midstate_num: _, version, subcore_id: _ } => {
                                 // Extract core ID from nonce (bits 25-31)
                                 let core_id = ((nonce >> 25) & 0x7f) as u8;
                                 
-                                // Extract actual job ID (upper 7 bits of job_id field, shifted left by 1)
-                                let actual_job_id = ((job_id & 0xf0) >> 1) as u64;
-                                
                                 // Send nonce found event
                                 let nonce_result = crate::chip::NonceResult {
-                                    job_id: actual_job_id,
+                                    job_id: job_id as u64,
                                     nonce,
                                     hash: [0; 32], // TODO: Calculate actual hash if needed
                                 };
@@ -215,7 +214,7 @@ impl BitaxeBoard {
                                 
                                 tracing::debug!(
                                     "Nonce found: job_id={}, nonce=0x{:08x}, core={}, version=0x{:04x}",
-                                    actual_job_id, nonce, core_id, version
+                                    job_id, nonce, core_id, version
                                 );
                             }
                             bm13xx::Response::ReadRegister { chip_address, register } => {
