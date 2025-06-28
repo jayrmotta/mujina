@@ -97,36 +97,198 @@ Daemon lifecycle management:
 
 ### Hardware Communication Layer
 
+The hardware communication layer is organized in four distinct levels, each
+with a specific responsibility. This design enables maximum code reuse and
+testability.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     Board Implementation                     │
+│   orchestrates all components for a specific board model     │
+└──────────────────────────────────────────────────────────────┘
+               │                               │                
+               │Peripherals                    │ASIC Chain      
+               │                               │                
+┌─────────────────────────────┐ ┌──────────────────────────────┐
+│           Drivers           │ │        ASIC Protocols        │
+│     board support chips     │ │   ┌──────────────────────┐   │
+│ ┌──────┐ ┌───────┐┌───────┐ │ │   │     BM13xx Family    │   │
+│ │ TMP75│ │INA260 ││EMC2101│ │ │   │  ┌──────┐ ┌──────┐   │   │
+│ └───┬──┘ └───┬───┘└───┬───┘ │ │   │  │BM1370│ │BM1362│   │   │
+└─────────────────────────────┘ │   │  └───┬──┘ └───┬──┘   │   │
+      │        │        │       │   └──────────────────────┘   │
+      └────────┼────────┘       └──────────────────────────────┘
+               │                           └────┬───┘           
+        ┌─────────────┐                         │               
+        │ HAL Traits  │                         │               
+┌───────└─────────────┘───────┐                 │               
+│        HAL Adapters         │                 │               
+│ ┌──────────┐ ┌────────────┐ │                 │               
+│ │I2cOverCtl│ │GpioOverCtrl│ │                 │               
+│ └────┬─────┘ └───────┬────┘ │                 │               
+└─────────────────────────────┘                 │               
+       └───────┬───────┘                        │               
+               │                                │               
+    ┌─────────────────────┐           ┌──────────────────┐      
+    │   Control Channel   │           │   Data Channel   │      
+    │  control  protocol  │           │  direct  serial  │      
+    └─────────────────────┘           └──────────────────┘      
+              │                                 │               
+              └────────────────┬────────────────┘               
+                               │                                
+┌──────────────────────────────────────────────────────────────┐
+│                          Transport                           │
+│                    USB/serial abstraction                    │
+│    ┌─────────────────────┐       ┌──────────────────────┐    │
+│    │   Control Channel   │       │     Data Channel     │    │
+│    │    /dev/ttyACM0     │       │     /dev/ttyACM1     │    │
+│    └─────────────────────┘       └──────────────────────┘    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### Key Insight: Two Separate Communication Paths
+
+Mining boards typically have two distinct communication paths:
+
+1. **Control Channel** (via control protocol): For board management
+   - Temperature sensors, fan control, power monitoring
+   - Reset lines, LED control
+   - Uses protocols like bitaxe-raw over USB serial
+
+2. **Data Channel** (direct to ASICs): For mining operations
+   - Sending work to ASIC chips
+   - Receiving nonces from ASIC chips
+   - Uses chip-specific protocols (BM13xx, etc.)
+   - Often a separate serial port connected directly to the ASIC chain
+
 #### `transport/`
-Low-level transport abstractions for communicating with mining hardware:
-- `usb.rs` - USB device discovery and enumeration
-- `serial.rs` - Async serial port handling via tokio-serial
-- Manages the dual-channel (control + data) USB serial devices
+Raw communication with hardware devices. This layer handles:
+- USB device discovery and enumeration
+- Opening and configuring serial ports
+- Managing dual-channel devices (control + data channels)
+- No protocol knowledge - just raw byte streams
 
 #### `control/`
-Hashboard control protocols (distinct from ASIC protocols):
-- `traits.rs` - `ControlProtocol` trait for different board types
-- `bitaxe_raw.rs` - Implementation of the bitaxe-raw protocol
-  - 7-byte packet format
-  - GPIO control (reset lines)
-  - ADC readings (voltage, temperature)
-  - I2C passthrough
+Protocol implementations for hashboard control channels. This layer:
+- Implements specific packet formats (e.g., bitaxe-raw's 7-byte header)
+- Provides protocol operations: GPIO control, ADC readings, I2C passthrough
+- Handles command/response sequencing and error checking
+- Translates high-level operations into protocol packets
 
 #### `hal/`
-Hardware Abstraction Layer providing async traits:
-- `i2c.rs` - Async I2C traits and adapters (I2C-over-control-protocol)
-- `gpio.rs` - Async GPIO traits (GPIO-over-control-protocol)
-- `adc.rs` - ADC channel traits
-- Allows drivers to work with both direct hardware and protocol-proxied
-  peripherals
+Hardware Abstraction Layer providing standard async traits. This layer:
+- Defines traits like `I2c`, `Gpio`, `Adc` that drivers can use
+- Provides adapters that implement these traits over control protocols
+- Enables drivers to work with any underlying transport
+- Allows the same driver to work with native Linux I2C or I2C-over-serial
 
 #### `drivers/`
-Reusable drivers for common mining peripherals:
-- Temperature sensors (TMP75, EMC2101)
-- Power monitors (INA260)
-- Fan controllers
-- Voltage regulators
-- Works with any `hal::I2c` implementation
+Reusable device drivers for mining peripherals. These drivers:
+- Are generic over HAL traits (work with any `I2c` implementation)
+- Provide high-level APIs for specific chips
+- Handle device-specific registers and protocols
+- Can be tested with mock HAL implementations
+
+#### `chip/` (ASIC protocols)
+ASIC chip communication protocols - the heart of mining operations:
+- Implements protocols for different ASIC families (BM13xx, etc.)
+- Handles work distribution and nonce collection
+- Manages chip initialization, frequency control, and status
+- Communicates directly via the data channel serial port
+- Each chip family has its own protocol implementation
+
+### Example: EmberOne Board Implementation
+
+Here's how these layers work together in practice:
+
+```rust
+// board/ember_one.rs
+use crate::transport::DualSerialTransport;
+use crate::control::bitaxe_raw::BitaxeRawControl;
+use crate::hal::adapters::I2cOverControl;
+use crate::drivers::{TMP75, INA260};
+use crate::chip::bm13xx::{BM1370, ChipChain};
+
+pub struct EmberOneBoard {
+    transport: DualSerialTransport,
+    control: BitaxeRawControl,
+    asic_chain: ChipChain<BM1370>,
+    temp_sensor: TMP75<I2cOverControl>,
+    power_monitor: INA260<I2cOverControl>,
+}
+
+impl EmberOneBoard {
+    pub async fn new(control_port: &str, data_port: &str) -> Result<Self> {
+        // 1. Create transport layer (dual serial ports)
+        let transport = DualSerialTransport::open(control_port, data_port)
+            .await
+            .context("Failed to open serial ports")?;
+        
+        // 2. Create control protocol handler for board management
+        let mut control = BitaxeRawControl::new(transport.control_channel());
+        
+        // 3. Initialize the board via control channel
+        control.set_gpio(ASIC_RESET_PIN, false).await?; // Reset ASICs
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        control.set_gpio(ASIC_RESET_PIN, true).await?;  // Release reset
+        
+        // 4. Create ASIC chain on the data channel
+        let asic_chain = ChipChain::<BM1370>::new(
+            transport.data_channel(),
+            1  // Single chip on EmberOne
+        );
+        
+        // 5. Initialize ASICs
+        asic_chain.enumerate_chips().await?;
+        asic_chain.set_frequency(500.0).await?; // 500 MHz
+        
+        // 6. Create HAL adapter for board peripherals
+        let i2c = I2cOverControl::new(&mut control);
+        
+        // 7. Create drivers for board support chips
+        let temp_sensor = TMP75::new(i2c.clone(), 0x48);
+        let power_monitor = INA260::new(i2c, 0x40);
+        
+        Ok(Self {
+            transport,
+            control,
+            asic_chain,
+            temp_sensor,
+            power_monitor,
+        })
+    }
+    
+    pub async fn send_work(&mut self, job: MiningJob) -> Result<()> {
+        // Send mining work directly to ASICs via data channel
+        self.asic_chain.send_job(0, job).await
+    }
+    
+    pub async fn check_for_nonces(&mut self) -> Result<Vec<Nonce>> {
+        // Poll ASICs for any found nonces
+        self.asic_chain.read_nonces().await
+    }
+    
+    pub async fn read_diagnostics(&mut self) -> Result<Diagnostics> {
+        // Read from board peripherals via control channel
+        let temp = self.temp_sensor.read_temperature().await?;
+        let power = self.power_monitor.read_power().await?;
+        let hashrate = self.asic_chain.estimate_hashrate();
+        
+        Ok(Diagnostics { temp, power, hashrate })
+    }
+}
+```
+
+This architecture provides several key benefits:
+
+1. **Clear separation**: ASICs communicate via data channel, peripherals via control
+2. **Reusability**: Drivers work with any HAL implementation, ASIC protocols work with any serial port
+3. **Testability**: Each layer can be tested in isolation with mocks
+4. **Flexibility**: New boards can mix and match components:
+   - Different ASIC chips (BM1370, BM1397, etc.)
+   - Different control protocols (bitaxe-raw, custom protocols)
+   - Different peripheral chips (various temp sensors, power monitors)
+5. **Maintainability**: Clear boundaries between transport, protocols, and business logic
 
 ### Mining Logic
 
@@ -134,11 +296,11 @@ Reusable drivers for common mining peripherals:
 **Existing module - expanded scope**
 
 Mining board abstractions that compose all hardware elements:
-- Unchanged: `Board` trait defining the interface
-- Unchanged: `bitaxe.rs` - Bitaxe board family
-- New: `generic_usb.rs` - Auto-detecting USB boards
-- New: `registry.rs` - Board type registration
-- Manages: chip chains, cooling, power delivery
+- `Board` trait defining the interface for all mining boards
+- `bitaxe.rs` - Original Bitaxe board implementation
+- `ember_one.rs` - EmberOne board using layered architecture
+- `generic_usb.rs` - Auto-detecting USB boards
+- Manages: chip chains, cooling, power delivery, monitoring
 
 #### `chip/`
 **Existing module - unchanged location**

@@ -86,6 +86,7 @@ mod tests {
 - Include examples in doc comments where helpful
 - Keep markdown files wrapped at 79 characters
 - Update architecture docs for significant changes
+- Use asciiflow.com for creating ASCII diagrams in documentation
 
 ### Commit Messages
 
