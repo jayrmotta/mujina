@@ -6,7 +6,6 @@
 
 use crate::hw_trait::{Result, HwError};
 use crate::hw_trait::i2c::I2c;
-use crate::tracing::prelude::*;
 
 /// Default I2C address for EMC2101
 pub const DEFAULT_ADDRESS: u8 = 0x4C;

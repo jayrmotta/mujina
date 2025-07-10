@@ -67,6 +67,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for TracingReader<R> {
 /// hashboard, including GPIO reset control and board initialization sequences.
 pub struct BitaxeBoard {
     /// Control channel for board management
+    #[expect(dead_code, reason = "Will be used for direct control protocol access")]
     control_channel: ControlChannel,
     /// GPIO controller
     gpio: BitaxeRawGpio,
@@ -80,6 +81,7 @@ pub struct BitaxeBoard {
     data_reader:
         Option<FramedRead<TracingReader<tokio::io::ReadHalf<SerialStream>>, bm13xx::FrameCodec>>,
     /// Protocol handler for chip communication
+    #[expect(dead_code, reason = "Will be used for protocol-specific operations")]
     protocol: BM13xxProtocol,
     /// Discovered chip information (passive record-keeping)
     chip_infos: Vec<ChipInfo>,
@@ -208,6 +210,7 @@ impl BitaxeBoard {
     }
 
     /// Send multiple configuration commands in sequence.
+    #[expect(dead_code, reason = "Will be used for batch configuration")]
     pub async fn send_config_commands(&mut self, commands: Vec<Command>) -> Result<(), BoardError> {
         for command in commands {
             self.send_config_command(command).await?;

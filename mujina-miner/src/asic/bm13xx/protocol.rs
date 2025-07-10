@@ -27,20 +27,20 @@ impl Frequency {
     pub const MAX_MHZ: f32 = 800.0;
     /// Base crystal frequency in MHz
     const CRYSTAL_MHZ: f32 = 25.0;
-
-    /// Create a new frequency with validation
+    
+    /// Create frequency from MHz value with validation
     pub fn from_mhz(mhz: f32) -> Result<Self, ProtocolError> {
         if mhz < Self::MIN_MHZ || mhz > Self::MAX_MHZ {
             return Err(ProtocolError::InvalidFrequency { mhz: mhz as u32 });
         }
         Ok(Self { mhz })
     }
-
+    
     /// Get frequency in MHz
     pub fn mhz(&self) -> f32 {
         self.mhz
     }
-
+    
     /// Calculate optimal PLL configuration for this frequency
     pub fn calculate_pll(&self) -> PllConfig {
         let target_freq = self.mhz;
@@ -1968,6 +1968,7 @@ impl BM13xxProtocol {
     /// 1. Set PLL parameters for desired frequency
     /// 2. Enable version rolling if supported
     /// 3. Configure other chip-specific settings
+    #[expect(dead_code, reason = "Will be used when we implement frequency configuration")]
     pub fn single_chip_init(&self, frequency: Frequency) -> Vec<Command> {
         let mut commands = Vec::new();
 
@@ -2139,6 +2140,7 @@ impl BM13xxProtocol {
     /// Generate frequency ramping sequence for gradual clock increase.
     ///
     /// This prevents power spikes and thermal stress during startup.
+    #[expect(dead_code, reason = "Will be used for safe frequency ramping on startup")]
     pub fn frequency_ramp(
         &self,
         start: Frequency,

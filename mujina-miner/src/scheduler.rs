@@ -13,15 +13,6 @@ use crate::board::{Board, BoardEvent};
 use crate::job_generator::{verify_nonce, JobGenerator};
 use crate::tracing::prelude::*;
 
-/// Initial mining frequency in MHz (start conservative)
-const INITIAL_FREQUENCY_MHZ: f32 = 200.0;
-/// Target mining frequency in MHz (can be ramped up to)
-const TARGET_FREQUENCY_MHZ: f32 = 500.0;
-/// Frequency ramp step size in MHz
-const FREQUENCY_STEP_MHZ: f32 = 25.0;
-/// Delay between frequency steps to allow chip stabilization
-const FREQUENCY_STEP_DELAY_MS: u64 = 500;
-
 // TODO: Future enhancements for frequency ramping:
 // - Make ramp parameters configurable (step size, delay, target)
 // - Monitor chip temperature/errors during ramp
@@ -338,6 +329,7 @@ impl MiningStats {
 
         // Theoretical hashrate for BM1370 at target frequency
         // BM1370 has 1280 cores, each doing 1 hash per clock cycle
+        const TARGET_FREQUENCY_MHZ: f32 = 500.0;
         let theoretical_hashrate = TARGET_FREQUENCY_MHZ as f64 * 1280.0; // MH/s
         info!(
             "  Theoretical: {:.2} MH/s at {} MHz",
