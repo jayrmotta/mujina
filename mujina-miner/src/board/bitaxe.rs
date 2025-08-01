@@ -642,23 +642,38 @@ impl Board for BitaxeBoard {
             };
             self.send_config_command(core_reg_cmd2).await?;
             
-            // Configure PLL for default frequency (200 MHz)
-            // Register 0x08: PLL0 divider configuration
-            // Default 200MHz: fb_divider=0xA0, ref_divider=0x02, post_dividers=0x41
-            let pll_config = bm13xx::protocol::PllConfig::new(
-                0x40A0, // fb_div (includes 0x40 flag for frequencies >= 2400MHz)
+            // Start with lower frequency like esp-miner does
+            // esp-miner starts at 62.5MHz and ramps up to target
+            let start_freq_config = bm13xx::protocol::PllConfig::new(
+                0x00A0, // Start lower: 62.5MHz (fb_div 0xA0, no 0x40 flag)
                 0x02,   // ref_div
-                0x41,   // post_div ((5-1) << 4) | (2-1) = 0x41
+                0x41,   // post_div
             );
-            let pll_cmd = Command::WriteRegister {
+            let start_pll_cmd = Command::WriteRegister {
                 all: true,
                 chip_address: 0x00,
-                register: bm13xx::protocol::Register::PllDivider(pll_config),
+                register: bm13xx::protocol::Register::PllDivider(start_freq_config),
             };
-            self.send_config_command(pll_cmd).await?;
+            self.send_config_command(start_pll_cmd).await?;
             
-            // Small delay for PLL to stabilize
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Small delay for initial PLL to stabilize
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            
+            // Now set target frequency (200 MHz)
+            let target_pll_config = bm13xx::protocol::PllConfig::new(
+                0x40A0, // Target: 200MHz (fb_div 0xA0 with 0x40 flag)
+                0x02,   // ref_div
+                0x41,   // post_div
+            );
+            let target_pll_cmd = Command::WriteRegister {
+                all: true,
+                chip_address: 0x00,
+                register: bm13xx::protocol::Register::PllDivider(target_pll_config),
+            };
+            self.send_config_command(target_pll_cmd).await?;
+            
+            // Longer delay for target frequency to stabilize
+            tokio::time::sleep(Duration::from_millis(300)).await;
             
             // Set ticket mask for difficulty
             // Register 0x14: ticket mask (difficulty control)
