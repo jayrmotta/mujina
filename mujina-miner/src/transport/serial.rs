@@ -432,30 +432,30 @@ impl SerialControl {
         tcsetattr(fd_ref, rustix::termios::OptionalActions::Now, &termios)
             .map_err(|e| SerialError::ConfigError(format!("Failed to apply termios: {}", e)))?;
 
-        // Update atomic
-        self.inner.baud_rate.store(baud_rate, Ordering::SeqCst);
+        // Update atomic with release ordering to ensure termios changes are visible
+        self.inner.baud_rate.store(baud_rate, Ordering::Release);
 
         Ok(())
     }
 
     /// Get the current baud rate.
     pub fn current_baud_rate(&self) -> u32 {
-        self.inner.baud_rate.load(Ordering::SeqCst)
+        self.inner.baud_rate.load(Ordering::Acquire)
     }
 
     /// Get the current data bits configuration.
     pub fn current_data_bits(&self) -> u8 {
-        self.inner.data_bits.load(Ordering::SeqCst)
+        self.inner.data_bits.load(Ordering::Acquire)
     }
 
     /// Get the current stop bits configuration.
     pub fn current_stop_bits(&self) -> u8 {
-        self.inner.stop_bits.load(Ordering::SeqCst)
+        self.inner.stop_bits.load(Ordering::Acquire)
     }
 
     /// Get the current parity configuration.
     pub fn current_parity(&self) -> Parity {
-        match self.inner.parity.load(Ordering::SeqCst) {
+        match self.inner.parity.load(Ordering::Acquire) {
             0 => Parity::None,
             1 => Parity::Odd,
             2 => Parity::Even,
