@@ -106,6 +106,12 @@ impl BitaxeBoard {
     /// GPIO pin number for ASIC reset control (active low)
     const ASIC_RESET_PIN: u8 = 0;
     
+    /// Bitaxe Gamma board configuration
+    /// The Gamma uses a BM1370 chip and runs at 1Mbps after initialization
+    const TARGET_BAUD_RATE: u32 = 1_000_000;
+    const CHIP_BAUD_REGISTER: bm13xx::protocol::BaudRate = bm13xx::protocol::BaudRate::Baud1M;
+    const EXPECTED_CHIP_ID: [u8; 2] = [0x13, 0x70]; // BM1370
+    
     /// Creates a new BitaxeBoard instance with the provided serial streams.
     ///
     /// # Arguments
