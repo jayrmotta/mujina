@@ -607,11 +607,12 @@ impl Board for BitaxeBoard {
     }
 
     async fn initialize(&mut self) -> Result<tokio::sync::mpsc::Receiver<BoardEvent>, BoardError> {
-        // Reset the board first
-        self.reset().await?;
+        // Phase 1: Hold ASIC in reset during power configuration
+        tracing::info!("Holding ASIC in reset during power initialization");
+        self.hold_in_reset().await?;
 
-        // Phase 1: Initialize power controller FIRST (before chip communication)
-        // This ensures stable core voltage before chip configuration
+        // Phase 2: Initialize power controller while ASIC is in reset
+        // This ensures stable core voltage before chip operation
         tracing::info!("Initializing power management");
 
         // Set I2C bus frequency to 100kHz for all devices
@@ -629,7 +630,14 @@ impl Board for BitaxeBoard {
         // Wait for voltage to fully stabilize after PMIC init
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // Phase 2: Initial communication at 115200 baud
+        // Phase 3: Release ASIC from reset now that power is stable
+        tracing::info!("Releasing ASIC from reset");
+        self.release_reset().await?;
+        
+        // Give ASIC time to stabilize after reset release
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Phase 4: Initial communication at 115200 baud
         tracing::info!("Starting chip initialization at 115200 baud");
 
         // Enable version rolling before chip discovery (as seen in serial captures)
