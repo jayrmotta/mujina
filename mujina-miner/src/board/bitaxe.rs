@@ -86,7 +86,6 @@ pub struct BitaxeBoard {
     /// Control handle for data channel (for baud rate changes)
     data_control: SerialControl,
     /// Protocol handler for chip communication
-    #[expect(dead_code, reason = "Will be used for protocol-specific operations")]
     protocol: BM13xxProtocol,
     /// Discovered chip information (passive record-keeping)
     chip_infos: Vec<ChipInfo>,
