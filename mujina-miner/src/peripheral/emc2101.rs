@@ -6,8 +6,8 @@
 //!
 //! Datasheet: <https://www.microchip.com/en-us/product/emc2101>
 
-use crate::hw_trait::{Result, HwError};
 use crate::hw_trait::i2c::I2c;
+use crate::hw_trait::{HwError, Result};
 
 /// Default I2C address for EMC2101
 pub const DEFAULT_ADDRESS: u8 = 0x4C;
@@ -79,83 +79,87 @@ impl<I: I2c> Emc2101<I> {
             address: DEFAULT_ADDRESS,
         }
     }
-    
+
     /// Create a new EMC2101 driver with custom address
     pub fn new_with_address(i2c: I, address: u8) -> Self {
         Self { i2c, address }
     }
-    
+
     /// Initialize the EMC2101 for basic operation
     pub async fn init(&mut self) -> Result<()> {
         // Verify chip ID
         let mfg_id = self.read_register(regs::MFG_ID).await?;
         let product_id = self.read_register(regs::PRODUCT_ID).await?;
         let revision = self.read_register(regs::REVISION).await?;
-        
+
         // Expected manufacturer ID for SMSC/Microchip
         const EXPECTED_MFG_ID: u8 = 0x5D;
         if mfg_id != EXPECTED_MFG_ID {
-            return Err(HwError::InvalidParameter(
-                format!("Wrong manufacturer ID: 0x{:02X}, expected 0x{:02X}", 
-                        mfg_id, EXPECTED_MFG_ID)
-            ));
+            return Err(HwError::InvalidParameter(format!(
+                "Wrong manufacturer ID: 0x{:02X}, expected 0x{:02X}",
+                mfg_id, EXPECTED_MFG_ID
+            )));
         }
-        
+
         // Valid product IDs for EMC2101
         const PRODUCT_ID_EMC2101_1: u8 = 0x16;
         const PRODUCT_ID_EMC2101_2: u8 = 0x28;
         if product_id != PRODUCT_ID_EMC2101_1 && product_id != PRODUCT_ID_EMC2101_2 {
-            return Err(HwError::InvalidParameter(
-                format!("Wrong product ID: 0x{:02X}, expected 0x{:02X} or 0x{:02X}", 
-                        product_id, PRODUCT_ID_EMC2101_1, PRODUCT_ID_EMC2101_2)
-            ));
+            return Err(HwError::InvalidParameter(format!(
+                "Wrong product ID: 0x{:02X}, expected 0x{:02X} or 0x{:02X}",
+                product_id, PRODUCT_ID_EMC2101_1, PRODUCT_ID_EMC2101_2
+            )));
         }
-        
+
         // Log the detected variant
         tracing::info!(
             "Detected EMC2101 variant: MFG=0x{:02X}, Product=0x{:02X}, Rev=0x{:02X}",
-            mfg_id, product_id, revision
+            mfg_id,
+            product_id,
+            revision
         );
-        
+
         // Read current CONFIG register to preserve other bits
         let mut config = self.read_register(regs::CONFIG).await?;
         tracing::debug!("Current CONFIG register: 0x{:02X}", config);
-        
+
         // Enable TACH input in CONFIG register
         // Bit 2 = 1: Enable TACH input
         const CONFIG_TACH_ENABLE_BIT: u8 = 0x04;
         config |= CONFIG_TACH_ENABLE_BIT;
         self.write_register(regs::CONFIG, config).await?;
         tracing::debug!("Updated CONFIG register to: 0x{:02X}", config);
-        
+
         // Small delay after enabling TACH for it to stabilize
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
+
         // Configure for PWM control mode
         // Enable PWM, disable RPM mode
         const FAN_CONFIG_PWM_MODE: u8 = 0x23;
-        self.write_register(regs::FAN_CONFIG, FAN_CONFIG_PWM_MODE).await?;
-        
+        self.write_register(regs::FAN_CONFIG, FAN_CONFIG_PWM_MODE)
+            .await?;
+
         // Set PWM frequency to ~25kHz (standard for 4-wire PWM fans)
         // PWM_FREQ=0x1F (31) gives ~25kHz with 360kHz base clock
         const PWM_FREQ_25KHZ: u8 = 0x1F;
         const PWM_DIV_NO_DIVIDE: u8 = 0x01;
         self.write_register(regs::PWM_FREQ, PWM_FREQ_25KHZ).await?;
-        self.write_register(regs::PWM_DIV, PWM_DIV_NO_DIVIDE).await?;
-        
+        self.write_register(regs::PWM_DIV, PWM_DIV_NO_DIVIDE)
+            .await?;
+
         Ok(())
     }
-    
+
     /// Set fan PWM duty cycle (0-255, where 255 = 100%)
     pub async fn set_pwm_duty(&mut self, duty: u8) -> Result<()> {
         self.write_register(regs::FAN_SETTING, duty).await
     }
-    
+
     /// Get current PWM duty cycle
     pub async fn get_pwm_duty(&mut self) -> Result<u8> {
         self.read_register(regs::FAN_SETTING).await
     }
-    
+
     /// Set fan PWM duty cycle as percentage (0-100)
     pub async fn set_pwm_percent(&mut self, percent: u8) -> Result<()> {
         const PWM_MAX: u8 = 255;
@@ -166,93 +170,97 @@ impl<I: I2c> Emc2101<I> {
         };
         self.set_pwm_duty(duty).await
     }
-    
+
     /// Get fan PWM duty cycle as percentage (0-100)
     pub async fn get_pwm_percent(&mut self) -> Result<u8> {
         const PWM_MAX: u8 = 255;
         let duty = self.get_pwm_duty().await?;
         Ok(((duty as u16 * 100) / PWM_MAX as u16) as u8)
     }
-    
+
     /// Read external temperature in Celsius
     /// This is typically connected to the ASIC's temperature diode
     pub async fn get_external_temperature(&mut self) -> Result<f32> {
         let high = self.read_register(regs::EXTERNAL_TEMP_HIGH).await?;
         let low = self.read_register(regs::EXTERNAL_TEMP_LOW).await?;
-        
+
         // Temperature is in 11-bit format with 0.125°C resolution
         // High byte is integer part, low byte bits 7-5 are fractional
         const FRACTION_BITS: u8 = 3;
         const FRACTION_SHIFT: u8 = 5;
-        let raw = ((high as u16) << FRACTION_BITS) | 
-                  ((low as u16) >> FRACTION_SHIFT);
-        
+        let raw = ((high as u16) << FRACTION_BITS) | ((low as u16) >> FRACTION_SHIFT);
+
         // Convert to Celsius
-        const RESOLUTION: f32 = 0.125;  // °C per LSB
-        const SIGN_BIT: u16 = 0x400;    // 11-bit sign bit
-        const VALUE_MASK: u16 = 0x7FF;  // 11-bit mask
-        
+        const RESOLUTION: f32 = 0.125; // °C per LSB
+        const SIGN_BIT: u16 = 0x400; // 11-bit sign bit
+        const VALUE_MASK: u16 = 0x7FF; // 11-bit mask
+
         let temp = if raw & SIGN_BIT != 0 {
             // Negative temperature (11-bit two's complement)
             -(((!raw & VALUE_MASK) + 1) as f32) * RESOLUTION
         } else {
             (raw as f32) * RESOLUTION
         };
-        
+
         Ok(temp)
     }
-    
+
     /// Read internal temperature in Celsius
     pub async fn get_internal_temperature(&mut self) -> Result<f32> {
         let raw = self.read_register(regs::INTERNAL_TEMP).await?;
-        
+
         // Internal temp is 8-bit signed with 1°C resolution
         Ok(raw as i8 as f32)
     }
-    
+
     /// Read TACH count (fan speed measurement)
     /// Returns raw TACH count - convert to RPM based on fan specs
     pub async fn get_tach_count(&mut self) -> Result<u16> {
         let high = self.read_register(regs::TACH_HIGH).await?;
         let low = self.read_register(regs::TACH_LOW).await?;
-        
+
         let count = ((high as u16) << 8) | (low as u16);
-        tracing::trace!("TACH registers: HIGH=0x{:02X}, LOW=0x{:02X}, combined=0x{:04X}", high, low, count);
-        
+        tracing::trace!(
+            "TACH registers: HIGH=0x{:02X}, LOW=0x{:02X}, combined=0x{:04X}",
+            high,
+            low,
+            count
+        );
+
         Ok(count)
     }
-    
+
     /// Get fan RPM
     /// Uses the simplified formula from esp-miner: RPM = 5400000 / TACH_count
     pub async fn get_rpm(&mut self) -> Result<u32> {
         let tach = self.get_tach_count().await?;
-        
-        const TACH_ERROR_VALUE: u16 = 0xFFFF;  // Indicates fan stopped/error
+
+        const TACH_ERROR_VALUE: u16 = 0xFFFF; // Indicates fan stopped/error
         if tach == 0 || tach == TACH_ERROR_VALUE {
             return Ok(0); // Fan stopped or error
         }
-        
+
         // EMC2101 constant for RPM calculation (from esp-miner)
         const EMC2101_FAN_RPM_NUMERATOR: u32 = 5_400_000;
         let rpm = EMC2101_FAN_RPM_NUMERATOR / (tach as u32);
-        
+
         // esp-miner returns 0 if RPM is exactly 82 (not sure why)
         const INVALID_RPM: u32 = 82;
         if rpm == INVALID_RPM {
             return Ok(0);
         }
-        
+
         Ok(rpm)
     }
-    
+
     // Helper methods for register access
-    
+
     async fn read_register(&mut self, reg: u8) -> Result<u8> {
         let mut buf = [0u8; 1];
         self.i2c.write_read(self.address, &[reg], &mut buf).await?;
         Ok(buf[0])
     }
-    
+
     async fn write_register(&mut self, reg: u8, value: u8) -> Result<()> {
         self.i2c.write(self.address, &[reg, value]).await
     }

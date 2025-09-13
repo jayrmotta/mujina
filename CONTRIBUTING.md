@@ -29,7 +29,12 @@ to follow. Please be respectful and constructive in all interactions.
    ```bash
    git remote add upstream https://github.com/mujina/mujina-miner.git
    ```
-4. Create a feature branch:
+4. **Set up Git hooks** (required):
+   ```bash
+   ./scripts/setup-hooks.sh
+   ```
+   This configures automatic checks for whitespace errors and other issues.
+5. Create a feature branch:
    ```bash
    git checkout -b feature/your-feature-name
    ```

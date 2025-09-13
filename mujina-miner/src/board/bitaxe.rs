@@ -15,12 +15,12 @@ use crate::asic::{ChipInfo, MiningJob};
 use crate::board::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
 use crate::hw_trait::gpio::{Gpio, GpioPin, PinValue};
 use crate::hw_trait::i2c::I2c;
-use crate::mgmt_protocol::{ControlChannel, BitaxeRawGpio};
 use crate::mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c;
+use crate::mgmt_protocol::{BitaxeRawGpio, ControlChannel};
 use crate::peripheral::emc2101::Emc2101;
 use crate::peripheral::tps546::{Tps546, Tps546Config};
 use crate::tracing::prelude::*;
-use crate::transport::serial::{SerialStream, SerialControl, SerialReader, SerialWriter};
+use crate::transport::serial::{SerialControl, SerialReader, SerialStream, SerialWriter};
 
 /// A wrapper around AsyncRead that traces raw bytes as they're read
 struct TracingReader<R> {
@@ -130,8 +130,9 @@ impl BitaxeBoard {
         let i2c = BitaxeRawI2c::new(control_channel.clone());
 
         // Create SerialStream for data channel at initial baud rate
-        let data_stream = SerialStream::new(data_path, 115200)
-            .map_err(|e| BoardError::InitializationFailed(format!("Failed to open data port: {}", e)))?;
+        let data_stream = SerialStream::new(data_path, 115200).map_err(|e| {
+            BoardError::InitializationFailed(format!("Failed to open data port: {}", e))
+        })?;
         let (data_reader, data_writer, data_control) = data_stream.split();
 
         // Wrap the data reader with tracing
@@ -180,13 +181,19 @@ impl BitaxeBoard {
     /// Release the mining chips from reset state.
     async fn release_reset(&mut self) -> Result<(), BoardError> {
         // Get the ASIC reset pin
-        let mut reset_pin = self.gpio.pin(Self::ASIC_RESET_PIN).await
-            .map_err(|e| BoardError::HardwareControl(format!("Failed to get reset pin: {}", e)))?;
+        let mut reset_pin =
+            self.gpio.pin(Self::ASIC_RESET_PIN).await.map_err(|e| {
+                BoardError::HardwareControl(format!("Failed to get reset pin: {}", e))
+            })?;
 
         // Set reset high (inactive)
-        tracing::debug!("De-asserting ASIC reset (GPIO {} = high)", Self::ASIC_RESET_PIN);
-        reset_pin.write(PinValue::High).await
-            .map_err(|e| BoardError::HardwareControl(format!("Failed to de-assert reset: {}", e)))?;
+        tracing::debug!(
+            "De-asserting ASIC reset (GPIO {} = high)",
+            Self::ASIC_RESET_PIN
+        );
+        reset_pin.write(PinValue::High).await.map_err(|e| {
+            BoardError::HardwareControl(format!("Failed to de-assert reset: {}", e))
+        })?;
 
         Ok(())
     }
@@ -198,12 +205,19 @@ impl BitaxeBoard {
     /// during shutdown to ensure chips are in a safe, non-hashing state.
     pub async fn hold_in_reset(&mut self) -> Result<(), BoardError> {
         // Get the ASIC reset pin
-        let mut reset_pin = self.gpio.pin(Self::ASIC_RESET_PIN).await
-            .map_err(|e| BoardError::HardwareControl(format!("Failed to get reset pin: {}", e)))?;
+        let mut reset_pin =
+            self.gpio.pin(Self::ASIC_RESET_PIN).await.map_err(|e| {
+                BoardError::HardwareControl(format!("Failed to get reset pin: {}", e))
+            })?;
 
         // Hold reset low (active)
-        tracing::debug!("Holding ASIC in reset (GPIO {} = low)", Self::ASIC_RESET_PIN);
-        reset_pin.write(PinValue::Low).await
+        tracing::debug!(
+            "Holding ASIC in reset (GPIO {} = low)",
+            Self::ASIC_RESET_PIN
+        );
+        reset_pin
+            .write(PinValue::Low)
+            .await
             .map_err(|e| BoardError::HardwareControl(format!("Failed to hold reset: {}", e)))?;
 
         Ok(())
@@ -430,10 +444,11 @@ impl BitaxeBoard {
                 // Delay before setting voltage
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                // Set initial output voltage (1.15V - BM1370 default from esp-miner)
-                match tps546.set_vout(1.15).await {
+                // Set initial output voltage, default for BM1370 from esp-miner
+                const DEFAULT_VOUT: f32 = 1.2;
+                match tps546.set_vout(DEFAULT_VOUT).await {
                     Ok(()) => {
-                        info!("Core voltage set to 1.15V");
+                        info!("Core voltage set to {DEFAULT_VOUT}V");
 
                         // Wait for voltage to stabilize
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -443,7 +458,7 @@ impl BitaxeBoard {
                             Ok(mv) => info!("Core voltage readback: {:.3}V", mv as f32 / 1000.0),
                             Err(e) => warn!("Failed to read core voltage: {}", e),
                         }
-                        
+
                         // Dump complete configuration for debugging
                         if let Err(e) = tps546.dump_configuration().await {
                             warn!("Failed to dump TPS546 configuration: {}", e);
@@ -451,9 +466,10 @@ impl BitaxeBoard {
                     }
                     Err(e) => {
                         error!("Failed to set initial core voltage: {}", e);
-                        return Err(BoardError::InitializationFailed(
-                            format!("Failed to set core voltage: {}", e)
-                        ));
+                        return Err(BoardError::InitializationFailed(format!(
+                            "Failed to set core voltage: {}",
+                            e
+                        )));
                     }
                 }
 
@@ -462,9 +478,10 @@ impl BitaxeBoard {
             }
             Err(e) => {
                 error!("Failed to initialize TPS546D24A power controller: {}", e);
-                Err(BoardError::InitializationFailed(
-                    format!("Power controller init failed: {}", e)
-                ))
+                Err(BoardError::InitializationFailed(format!(
+                    "Power controller init failed: {}",
+                    e
+                )))
             }
         }
     }
@@ -498,13 +515,17 @@ impl BitaxeBoard {
     }
 
     /// Generate frequency ramp steps for smooth PLL transitions
-    /// 
+    ///
     /// Calculates PLL configurations for each frequency step from start to target.
     /// Uses the same algorithm as esp-miner for BM1370 chips.
-    fn generate_frequency_ramp_steps(start_mhz: f32, target_mhz: f32, step_mhz: f32) -> Vec<bm13xx::protocol::PllConfig> {
+    fn generate_frequency_ramp_steps(
+        start_mhz: f32,
+        target_mhz: f32,
+        step_mhz: f32,
+    ) -> Vec<bm13xx::protocol::PllConfig> {
         let mut configs = Vec::new();
         let mut current = start_mhz;
-        
+
         // Generate steps from start to target
         while current <= target_mhz {
             if let Some(config) = Self::calculate_pll_for_frequency(current) {
@@ -512,63 +533,72 @@ impl BitaxeBoard {
             } else {
                 tracing::warn!("Failed to calculate PLL for {:.2} MHz, skipping", current);
             }
-            
+
             current += step_mhz;
-            
+
             // Ensure we don't overshoot but always include the target
             if current > target_mhz && (current - step_mhz) < target_mhz {
                 current = target_mhz;
             }
         }
-        
+
         configs
     }
-    
+
     /// Calculate PLL configuration for a specific frequency
-    /// 
+    ///
     /// This follows the BM1370/esp-miner algorithm exactly:
     /// - Crystal frequency: 25 MHz
     /// - ref_div: 2 or 1 (prefer 2)
     /// - post_div1: 1-7 (must be >= post_div2)
     /// - post_div2: 1-7
     /// - fb_div: 0xa0-0xef (160-239)
-    /// 
+    ///
     /// Formula: freq = 25 * fb_div / (ref_div * post_div1 * post_div2)
-    /// 
+    ///
     /// Note: esp-miner uses a "first-found" algorithm rather than finding the optimal
     /// configuration, and we need to match its behavior for consistency.
     fn calculate_pll_for_frequency(target_freq: f32) -> Option<bm13xx::protocol::PllConfig> {
         const CRYSTAL_FREQ: f32 = 25.0;
         const MAX_FREQ_ERROR: f32 = 1.0; // Maximum acceptable frequency error in MHz
-        
+
         let mut best_fb_div = 0u16;
         let mut best_ref_div = 0u8;
         let mut best_post_div1 = 0u8;
         let mut best_post_div2 = 0u8;
         let mut min_error = 10.0; // esp-miner starts with min_difference = 10
-        
+
         // Follow esp-miner's exact loop order to get same results
         // It stops at first solution under max_diff (1.0 MHz)
         for ref_div in [2, 1] {
-            if best_fb_div != 0 { break; } // Stop once we find a solution
-            
+            if best_fb_div != 0 {
+                break;
+            } // Stop once we find a solution
+
             for post_div1 in (1..=7).rev() {
-                if best_fb_div != 0 { break; }
-                
+                if best_fb_div != 0 {
+                    break;
+                }
+
                 for post_div2 in (1..=7).rev() {
-                    if best_fb_div != 0 { break; }
-                    
+                    if best_fb_div != 0 {
+                        break;
+                    }
+
                     if post_div1 >= post_div2 {
                         // Calculate required feedback divider (esp-miner uses round())
-                        let fb_div_f = (post_div1 * post_div2) as f32 * target_freq * ref_div as f32 / CRYSTAL_FREQ;
+                        let fb_div_f =
+                            (post_div1 * post_div2) as f32 * target_freq * ref_div as f32
+                                / CRYSTAL_FREQ;
                         let fb_div = fb_div_f.round() as u16;
-                        
+
                         // Check if fb_div is in valid range
                         if (0xa0..=0xef).contains(&fb_div) {
                             // Calculate actual frequency with this configuration
-                            let actual_freq = CRYSTAL_FREQ * fb_div as f32 / (ref_div * post_div1 * post_div2) as f32;
+                            let actual_freq = CRYSTAL_FREQ * fb_div as f32
+                                / (ref_div * post_div1 * post_div2) as f32;
                             let error = (actual_freq - target_freq).abs();
-                            
+
                             // esp-miner accepts first solution with error < min_difference AND < max_diff
                             if error < min_error && error < MAX_FREQ_ERROR {
                                 best_fb_div = fb_div;
@@ -583,24 +613,29 @@ impl BitaxeBoard {
                 }
             }
         }
-        
+
         if best_fb_div == 0 {
             return None;
         }
-        
+
         // Encode post dividers as per hardware format
         let post_div = ((best_post_div1 - 1) << 4) | (best_post_div2 - 1);
-        
+
         // Add the 0x50 flag for most frequencies, 0x40 for high frequencies
         // esp-miner checks: if (fb_divider * 25 / (float) ref_divider >= 2400)
-        let fb_div_with_flag = if (best_fb_div as f32 * CRYSTAL_FREQ / best_ref_div as f32) >= 2400.0 {
-            // This condition is rarely met with our frequency range
-            best_fb_div | 0x5000  // Actually esp-miner doesn't set any flag here, just uses 0x50
-        } else {
-            best_fb_div | 0x5000  // esp-miner sets freqbuf[2] = 0x50 for normal frequencies
-        };
-        
-        Some(bm13xx::protocol::PllConfig::new(fb_div_with_flag, best_ref_div, post_div))
+        let fb_div_with_flag =
+            if (best_fb_div as f32 * CRYSTAL_FREQ / best_ref_div as f32) >= 2400.0 {
+                // This condition is rarely met with our frequency range
+                best_fb_div | 0x5000 // Actually esp-miner doesn't set any flag here, just uses 0x50
+            } else {
+                best_fb_div | 0x5000 // esp-miner sets freqbuf[2] = 0x50 for normal frequencies
+            };
+
+        Some(bm13xx::protocol::PllConfig::new(
+            fb_div_with_flag,
+            best_ref_div,
+            post_div,
+        ))
     }
 
     /// Spawn a task to periodically log management statistics
@@ -608,7 +643,7 @@ impl BitaxeBoard {
         // Clone what we need for the task
         let i2c = self.i2c.clone();
         let chip_count = self.chip_infos.len();
-        
+
         // Clone event channel for reporting critical faults
         let event_tx = self.event_tx.clone();
 
@@ -689,25 +724,25 @@ impl BitaxeBoard {
                 if let Err(e) = power.check_status().await {
                     // Log the critical fault
                     error!("CRITICAL: Power controller fault detected: {}", e);
-                    
+
                     // Send BoardFault event
                     if let Some(ref tx) = event_tx {
                         let fault_event = BoardEvent::BoardFault {
                             component: "power_controller".to_string(),
                             fault: e.to_string(),
-                            recoverable: false,  // Power faults are critical
+                            recoverable: false, // Power faults are critical
                         };
                         if let Err(send_err) = tx.send(fault_event).await {
                             error!("Failed to send board fault event: {}", send_err);
                         }
                     }
-                    
-                    // Try to clear the fault once  
+
+                    // Try to clear the fault once
                     warn!("Attempting to clear power controller faults...");
                     if let Err(clear_err) = power.clear_faults().await {
                         error!("Failed to clear faults: {}", clear_err);
                     }
-                    
+
                     // Continue monitoring - let scheduler decide what to do
                     // Don't exit the task, just skip this iteration
                     continue;
@@ -748,10 +783,9 @@ impl Board for BitaxeBoard {
         tracing::info!("Initializing power management");
 
         // Set I2C bus frequency to 100kHz for all devices
-        self.i2c.set_frequency(100_000).await
-            .map_err(|e| BoardError::InitializationFailed(
-                format!("Failed to set I2C frequency: {}", e)
-            ))?;
+        self.i2c.set_frequency(100_000).await.map_err(|e| {
+            BoardError::InitializationFailed(format!("Failed to set I2C frequency: {}", e))
+        })?;
 
         // Initialize fan controller first to test I2C
         self.init_fan_controller().await?;
@@ -765,7 +799,7 @@ impl Board for BitaxeBoard {
         // Phase 3: Release ASIC from reset now that power is stable
         tracing::info!("Releasing ASIC from reset");
         self.release_reset().await?;
-        
+
         // Give ASIC time to stabilize after reset release
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -849,21 +883,19 @@ impl Board for BitaxeBoard {
         self.send_config_command(Command::ChainInactive).await?;
 
         // SetChipAddress command for addr=0x00
-        let set_addr_cmd = Command::SetChipAddress {
-            chip_address: 0x00,
-        };
+        let set_addr_cmd = Command::SetChipAddress { chip_address: 0x00 };
         self.send_config_command(set_addr_cmd).await?;
 
         // BM1370 requires additional initialization after chip discovery
         // Step 4: Core Configuration (Broadcast)
         tracing::debug!("Sending broadcast core configuration");
-        
+
         // CoreRegister = 0x8B0080 (sent as big-endian: 0x80 0x00 0x8B 0x00)
         let core_reg_cmd1 = Command::WriteRegister {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_8B00,  // Big-endian encoding
+                raw_value: 0x8000_8B00, // Big-endian encoding
             },
         };
         self.send_config_command(core_reg_cmd1).await?;
@@ -873,14 +905,14 @@ impl Board for BitaxeBoard {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_800C,  // Big-endian encoding
+                raw_value: 0x8000_800C, // Big-endian encoding
             },
         };
         self.send_config_command(core_reg_cmd2).await?;
 
         // Set ticket mask for difficulty (before IoDriverStrength)
         // Register 0x14: ticket mask (difficulty control)
-        let difficulty_mask = bm13xx::protocol::DifficultyMask::from_difficulty(255);  // Start with difficulty 255
+        let difficulty_mask = bm13xx::protocol::DifficultyMask::from_difficulty(255); // Start with difficulty 255
         let ticket_mask_cmd = Command::WriteRegister {
             all: true,
             chip_address: 0x00,
@@ -893,17 +925,17 @@ impl Board for BitaxeBoard {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::IoDriverStrength(
-                bm13xx::protocol::IoDriverStrength::normal()
+                bm13xx::protocol::IoDriverStrength::normal(),
             ),
         };
         self.send_config_command(io_strength_cmd).await?;
 
         // Step 5: Chip-Specific Configuration (addr=0x00)
         tracing::debug!("Sending chip-specific configuration for address 0x00");
-        
+
         // InitControl = 0xF0010700 (chip-specific, not broadcast)
         let init_control_specific = Command::WriteRegister {
-            all: false,  // Not broadcast - specific to chip 0x00
+            all: false, // Not broadcast - specific to chip 0x00
             chip_address: 0x00,
             register: bm13xx::protocol::Register::InitControl {
                 raw_value: 0xF0010700,
@@ -926,7 +958,7 @@ impl Board for BitaxeBoard {
             all: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_8B00,  // Big-endian
+                raw_value: 0x8000_8B00, // Big-endian
             },
         };
         self.send_config_command(core_reg_specific1).await?;
@@ -936,7 +968,7 @@ impl Board for BitaxeBoard {
             all: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_800C,  // Big-endian
+                raw_value: 0x8000_800C, // Big-endian
             },
         };
         self.send_config_command(core_reg_specific2).await?;
@@ -946,20 +978,20 @@ impl Board for BitaxeBoard {
             all: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_82AA,  // Big-endian encoding
+                raw_value: 0x8000_82AA, // Big-endian encoding
             },
         };
         self.send_config_command(core_reg_specific3).await?;
 
         // Step 6: Additional Settings
         tracing::debug!("Sending additional settings");
-        
+
         // MiscSettings = 0x80440000 (note: different from current 0x00004480)
         let misc_b9_cmd = Command::WriteRegister {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscSettings {
-                raw_value: 0x80440000,  // Little-endian: bytes 00 00 44 80
+                raw_value: 0x80440000, // Little-endian: bytes 00 00 44 80
             },
         };
         self.send_config_command(misc_b9_cmd).await?;
@@ -969,7 +1001,7 @@ impl Board for BitaxeBoard {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::AnalogMux {
-                raw_value: 0x02000000,  // Little-endian: bytes 00 00 00 02
+                raw_value: 0x02000000, // Little-endian: bytes 00 00 00 02
             },
         };
         self.send_config_command(analog_mux_cmd).await?;
@@ -979,7 +1011,7 @@ impl Board for BitaxeBoard {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscSettings {
-                raw_value: 0x80440000,  // Little-endian: bytes 00 00 44 80
+                raw_value: 0x80440000, // Little-endian: bytes 00 00 44 80
             },
         };
         self.send_config_command(misc_b9_cmd2).await?;
@@ -989,7 +1021,7 @@ impl Board for BitaxeBoard {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
-                raw_value: 0x8000_8DEE,  // Big-endian encoding
+                raw_value: 0x8000_8DEE, // Big-endian encoding
             },
         };
         self.send_config_command(core_reg_final).await?;
@@ -998,13 +1030,13 @@ impl Board for BitaxeBoard {
         // The frequency is ramped up gradually through many steps
         // Following esp-miner's approach: 6.25 MHz steps with 100ms delays
         tracing::info!("Starting frequency ramping from 56.25 MHz to 525 MHz");
-        
+
         // Generate frequency steps programmatically
         // Start at 56.25 MHz, increment by 6.25 MHz up to 525 MHz
         let frequency_steps = Self::generate_frequency_ramp_steps(56.25, 525.0, 6.25);
-        
+
         tracing::debug!("Ramping through {} frequency steps", frequency_steps.len());
-        
+
         for (i, pll_config) in frequency_steps.iter().enumerate() {
             let pll_cmd = Command::WriteRegister {
                 all: true,
@@ -1012,35 +1044,38 @@ impl Board for BitaxeBoard {
                 register: bm13xx::protocol::Register::PllDivider(*pll_config),
             };
             self.send_config_command(pll_cmd).await?;
-            
+
             // Wait ~100ms between frequency steps (matching esp-miner)
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             if i % 10 == 0 || i == frequency_steps.len() - 1 {
                 tracing::trace!("Frequency ramp step {}/{}", i + 1, frequency_steps.len());
             }
         }
-        
+
         tracing::info!("Frequency ramping complete");
 
         // Step 8: Final Configuration
         // After frequency ramping is complete
-        
+
         // NonceRange = 0xB51E0000 (correct value from reference)
-        let nonce_range_value = 0x0000B51E;  // Raw value from captures
+        let nonce_range_value = 0x0000B51E; // Raw value from captures
         let nonce_range_cmd = Command::WriteRegister {
             all: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::NonceRange(
                 // Create NonceRangeConfig with the exact value
                 // Note: This might need a custom constructor in the protocol module
-                bm13xx::protocol::NonceRangeConfig::from_raw(nonce_range_value)
+                bm13xx::protocol::NonceRangeConfig::from_raw(nonce_range_value),
             ),
         };
         self.send_config_command(nonce_range_cmd).await?;
 
         // UartBaud = 0x00023011 (1M baud) - NOW after frequency ramping
-        tracing::info!("Sending baud rate change command to BM1370 for {} baud", Self::TARGET_BAUD_RATE);
+        tracing::info!(
+            "Sending baud rate change command to BM1370 for {} baud",
+            Self::TARGET_BAUD_RATE
+        );
         let baud_cmd = Command::WriteRegister {
             all: true,
             chip_address: 0x00,
@@ -1052,17 +1087,24 @@ impl Board for BitaxeBoard {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Change host baud rate to match
-        tracing::info!("Changing host serial port from 115200 to {} baud", Self::TARGET_BAUD_RATE);
-        self.data_control.set_baud_rate(Self::TARGET_BAUD_RATE)
-            .map_err(|e| BoardError::InitializationFailed(
-                format!("Failed to change baud rate: {}", e)
-            ))?;
+        tracing::info!(
+            "Changing host serial port from 115200 to {} baud",
+            Self::TARGET_BAUD_RATE
+        );
+        self.data_control
+            .set_baud_rate(Self::TARGET_BAUD_RATE)
+            .map_err(|e| {
+                BoardError::InitializationFailed(format!("Failed to change baud rate: {}", e))
+            })?;
 
         // Wait for baud rate change to stabilize
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        tracing::info!("Baud rate change complete, continuing at {} baud", Self::TARGET_BAUD_RATE);
-        
+        tracing::info!(
+            "Baud rate change complete, continuing at {} baud",
+            Self::TARGET_BAUD_RATE
+        );
+
         // Step 9: Version Mask Re-Send (final)
         // After all configuration, send version mask once more
         tracing::debug!("Sending final version mask configuration");
@@ -1255,93 +1297,103 @@ mod tests {
         // where XX YY = fb_div (big-endian), ZZ = ref_div, WW = post_div
         let test_cases = vec![
             // From the capture document:
-            (62.50,  0x50D2, 0x02, 0x65),  // tx: [55 AA 51 09 00 08 50 D2 02 65 05]
-            (68.75,  0x50E7, 0x02, 0x65),  // tx: [55 AA 51 09 00 08 50 E7 02 65 1C]
-            (75.00,  0x50D2, 0x02, 0x64),  // tx: [55 AA 51 09 00 08 50 D2 02 64 00]
-            (81.25,  0x50E4, 0x02, 0x64),  // tx: [55 AA 51 09 00 08 50 E4 02 64 14]
-            (87.50,  0x50C4, 0x02, 0x63),  // tx: [55 AA 51 09 00 08 50 C4 02 63 18]
-            (93.75,  0x50D2, 0x02, 0x63),  // tx: [55 AA 51 09 00 08 50 D2 02 63 1B]
-            (100.00, 0x50E0, 0x02, 0x63),  // tx: [55 AA 51 09 00 08 50 E0 02 63 00]
-            (525.00, 0x50D2, 0x02, 0x40),  // tx: [55 AA 51 09 00 08 50 D2 02 40 05] (final)
+            (62.50, 0x50D2, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 D2 02 65 05]
+            (68.75, 0x50E7, 0x02, 0x65), // tx: [55 AA 51 09 00 08 50 E7 02 65 1C]
+            (75.00, 0x50D2, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 D2 02 64 00]
+            (81.25, 0x50E4, 0x02, 0x64), // tx: [55 AA 51 09 00 08 50 E4 02 64 14]
+            (87.50, 0x50C4, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 C4 02 63 18]
+            (93.75, 0x50D2, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 D2 02 63 1B]
+            (100.00, 0x50E0, 0x02, 0x63), // tx: [55 AA 51 09 00 08 50 E0 02 63 00]
+            (525.00, 0x50D2, 0x02, 0x40), // tx: [55 AA 51 09 00 08 50 D2 02 40 05] (final)
         ];
 
         for (freq_mhz, expected_fb, expected_ref, expected_post) in test_cases {
             let config = BitaxeBoard::calculate_pll_for_frequency(freq_mhz)
                 .unwrap_or_else(|| panic!("Failed to calculate PLL for {} MHz", freq_mhz));
-            
+
             // Extract the actual fb_div without flags for comparison
             let actual_fb_base = config.fb_div & 0xFF;
             let expected_fb_base = expected_fb & 0xFF;
-            
+
             // Check that the base fb_div matches (allowing for different flag bits)
             assert_eq!(
                 actual_fb_base, expected_fb_base,
                 "FB divider mismatch for {} MHz: expected 0x{:02X}, got 0x{:02X}",
                 freq_mhz, expected_fb_base, actual_fb_base
             );
-            
+
             assert_eq!(
                 config.ref_div, expected_ref,
                 "Ref divider mismatch for {} MHz: expected {}, got {}",
                 freq_mhz, expected_ref, config.ref_div
             );
-            
+
             assert_eq!(
                 config.post_div, expected_post,
                 "Post divider mismatch for {} MHz: expected 0x{:02X}, got 0x{:02X}",
                 freq_mhz, expected_post, config.post_div
             );
-            
+
             // Verify the frequency calculation
             let post_div1 = ((config.post_div >> 4) & 0xF) + 1;
             let post_div2 = (config.post_div & 0xF) + 1;
-            let calculated_freq = 25.0 * actual_fb_base as f32 / (config.ref_div * post_div1 * post_div2) as f32;
-            
+            let calculated_freq =
+                25.0 * actual_fb_base as f32 / (config.ref_div * post_div1 * post_div2) as f32;
+
             assert!(
                 (calculated_freq - freq_mhz).abs() < 1.0,
                 "Frequency calculation error for {} MHz: calculated {} MHz",
-                freq_mhz, calculated_freq
+                freq_mhz,
+                calculated_freq
             );
         }
     }
-    
+
     #[test]
     fn test_frequency_ramp_generation() {
         // Test that we generate the correct number of steps
         let steps = BitaxeBoard::generate_frequency_ramp_steps(56.25, 525.0, 6.25);
-        
+
         // Should have steps from 56.25 to 525.0 in 6.25 MHz increments
         // That's (525 - 56.25) / 6.25 + 1 = 75.0 steps
         assert_eq!(steps.len(), 76, "Expected 76 frequency steps");
-        
+
         // Verify first and last frequencies by calculating them back
         if let Some(first) = steps.first() {
             let post_div1 = ((first.post_div >> 4) & 0xF) + 1;
             let post_div2 = (first.post_div & 0xF) + 1;
-            let first_freq = 25.0 * (first.fb_div & 0xFF) as f32 / (first.ref_div * post_div1 * post_div2) as f32;
-            assert!((first_freq - 56.25).abs() < 1.0, "First frequency should be ~56.25 MHz");
+            let first_freq = 25.0 * (first.fb_div & 0xFF) as f32
+                / (first.ref_div * post_div1 * post_div2) as f32;
+            assert!(
+                (first_freq - 56.25).abs() < 1.0,
+                "First frequency should be ~56.25 MHz"
+            );
         }
-        
+
         if let Some(last) = steps.last() {
             let post_div1 = ((last.post_div >> 4) & 0xF) + 1;
             let post_div2 = (last.post_div & 0xF) + 1;
-            let last_freq = 25.0 * (last.fb_div & 0xFF) as f32 / (last.ref_div * post_div1 * post_div2) as f32;
-            assert!((last_freq - 525.0).abs() < 1.0, "Last frequency should be ~525 MHz");
+            let last_freq =
+                25.0 * (last.fb_div & 0xFF) as f32 / (last.ref_div * post_div1 * post_div2) as f32;
+            assert!(
+                (last_freq - 525.0).abs() < 1.0,
+                "Last frequency should be ~525 MHz"
+            );
         }
     }
-    
+
     #[test]
     fn test_pll_flag_setting() {
         // Test that the 0x50 flag is set (esp-miner always uses 0x50 in practice)
-        
+
         // Low frequency (should use 0x50 flag)
         let low_freq = BitaxeBoard::calculate_pll_for_frequency(100.0).unwrap();
         assert_eq!(low_freq.fb_div & 0xF000, 0x5000, "Should have 0x50 flag");
-        
+
         // High frequency also uses 0x50 in esp-miner for our frequency range
         let high_freq = BitaxeBoard::calculate_pll_for_frequency(525.0).unwrap();
         assert_eq!(high_freq.fb_div & 0xF000, 0x5000, "Should have 0x50 flag");
-        
+
         // The 0x40 flag would only be used for very high internal frequencies
         // which aren't reached in the 56.25-525 MHz range we use
     }

@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 
-use crate::hw_trait::{HwError, Result};
-use crate::hw_trait::gpio::{Gpio, GpioPin, PinMode, PinValue};
-use super::Packet;
 use super::channel::ControlChannel;
+use super::Packet;
+use crate::hw_trait::gpio::{Gpio, GpioPin, PinMode, PinValue};
+use crate::hw_trait::{HwError, Result};
 
 /// GPIO controller using bitaxe-raw control protocol.
 pub struct BitaxeRawGpio {
@@ -22,7 +22,7 @@ impl BitaxeRawGpio {
 #[async_trait]
 impl Gpio for BitaxeRawGpio {
     type Pin = BitaxeRawGpioPin;
-    
+
     async fn pin(&mut self, number: u8) -> Result<Self::Pin> {
         Ok(BitaxeRawGpioPin {
             channel: self.channel.clone(),
@@ -47,24 +47,29 @@ impl GpioPin for BitaxeRawGpioPin {
         let _ = mode;
         Ok(())
     }
-    
+
     async fn write(&mut self, value: PinValue) -> Result<()> {
         let packet = Packet::gpio_write(0, self.number, value.into());
         self.channel.send_packet(packet).await?;
         Ok(())
     }
-    
+
     async fn read(&mut self) -> Result<PinValue> {
         let packet = Packet::gpio_read(0, self.number);
         let response = self.channel.send_packet(packet).await?;
-        
+
         // Response should contain one byte
         if response.data.len() != 1 {
-            return Err(HwError::InvalidParameter(
-                format!("Expected 1 byte in GPIO read response, got {}", response.data.len())
-            ));
+            return Err(HwError::InvalidParameter(format!(
+                "Expected 1 byte in GPIO read response, got {}",
+                response.data.len()
+            )));
         }
-        
-        Ok(if response.data[0] != 0 { PinValue::High } else { PinValue::Low })
+
+        Ok(if response.data[0] != 0 {
+            PinValue::High
+        } else {
+            PinValue::Low
+        })
     }
 }

@@ -3,6 +3,7 @@
 //! This module provides a control channel abstraction that handles
 //! packet ID management and request/response correlation.
 
+use futures::SinkExt;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,13 +12,12 @@ use tokio::time;
 use tokio_serial::SerialStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use futures::SinkExt;
 
 use super::{ControlCodec, Packet, Response};
 use tracing::trace;
 
 /// Control channel for bitaxe-raw protocol communication.
-/// 
+///
 /// This channel handles packet ID allocation and request/response matching.
 /// It can be cloned to allow multiple components to share the same channel.
 #[derive(Clone)]
@@ -47,16 +47,21 @@ impl ControlChannel {
     /// Send a raw packet and wait for response.
     pub async fn send_packet(&self, mut packet: Packet) -> io::Result<Response> {
         let mut inner = self.inner.lock().await;
-        
+
         // Assign packet ID
         packet.id = inner.next_id;
         inner.next_id = inner.next_id.wrapping_add(1);
         let expected_id = packet.id;
-        
-        trace!("Sending control packet: id={}, page={:?}, command={:#02x}, data_len={}", 
-               packet.id, packet.page, packet.command, packet.data.len());
+
+        trace!(
+            "Sending control packet: id={}, page={:?}, command={:#02x}, data_len={}",
+            packet.id,
+            packet.page,
+            packet.command,
+            packet.data.len()
+        );
         trace!("Control packet data: {:02x?}", packet.data);
-        
+
         // Send the packet
         inner.writer.send(packet).await?;
 
@@ -68,7 +73,10 @@ impl ControlChannel {
                     if resp.id != expected_id {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("Response ID mismatch: expected {}, got {}", expected_id, resp.id),
+                            format!(
+                                "Response ID mismatch: expected {}, got {}",
+                                expected_id, resp.id
+                            ),
                         ));
                     }
                     Ok(resp)

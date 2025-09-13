@@ -145,7 +145,7 @@ pub async fn task(running: CancellationToken, mut board_rx: mpsc::Receiver<Box<d
                     }
                     BoardEvent::BoardFault { component, fault, recoverable } => {
                         error!("Board fault in {}: {}", component, fault);
-                        
+
                         if !recoverable {
                             error!("Non-recoverable board fault detected - shutting down board");
                             // Cancel all active jobs

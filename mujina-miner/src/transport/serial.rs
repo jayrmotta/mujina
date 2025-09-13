@@ -16,9 +16,9 @@
 //! after it has been split for concurrent I/O operations.
 
 use std::io;
-use std::os::unix::io::{AsRawFd, BorrowedFd, IntoRawFd, RawFd};
 #[cfg(test)]
 use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, BorrowedFd, IntoRawFd, RawFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -28,9 +28,7 @@ use std::time::Duration;
 use futures::ready;
 use parking_lot::RwLock;
 use rustix::fs::{open, Mode, OFlags};
-use rustix::termios::{
-    tcgetattr, tcsetattr, tcdrain, ControlModes,
-};
+use rustix::termios::{tcdrain, tcgetattr, tcsetattr, ControlModes};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -79,10 +77,10 @@ pub enum SerialError {
 
     #[error("Serial port disconnected")]
     Disconnected,
-    
+
     #[error("Hardware error on serial port")]
     HardwareError,
-    
+
     #[error("Operation timed out")]
     Timeout,
 }
@@ -152,7 +150,8 @@ fn apply_serial_config<Fd: rustix::fd::AsFd>(
     termios.make_raw();
 
     // Set baud rate
-    termios.set_speed(config.baud_rate)
+    termios
+        .set_speed(config.baud_rate)
         .map_err(|e| SerialError::ConfigError(format!("Failed to set baud rate: {}", e)))?;
 
     // Configure data bits
@@ -162,7 +161,12 @@ fn apply_serial_config<Fd: rustix::fd::AsFd>(
         6 => termios.control_modes |= ControlModes::CS6,
         7 => termios.control_modes |= ControlModes::CS7,
         8 => termios.control_modes |= ControlModes::CS8,
-        _ => return Err(SerialError::ConfigError(format!("Invalid data bits: {}", config.data_bits))),
+        _ => {
+            return Err(SerialError::ConfigError(format!(
+                "Invalid data bits: {}",
+                config.data_bits
+            )))
+        }
     }
 
     // Configure parity
@@ -184,7 +188,12 @@ fn apply_serial_config<Fd: rustix::fd::AsFd>(
     match config.stop_bits {
         1 => termios.control_modes &= !ControlModes::CSTOPB,
         2 => termios.control_modes |= ControlModes::CSTOPB,
-        _ => return Err(SerialError::ConfigError(format!("Invalid stop bits: {}", config.stop_bits))),
+        _ => {
+            return Err(SerialError::ConfigError(format!(
+                "Invalid stop bits: {}",
+                config.stop_bits
+            )))
+        }
     }
 
     // Apply configuration
@@ -275,10 +284,10 @@ impl SerialStream {
     pub(crate) fn from_fd(fd: RawFd, config: SerialConfig) -> Result<Self, SerialError> {
         // Convert raw fd to OwnedFd
         let fd = unsafe { rustix::fd::OwnedFd::from_raw_fd(fd) };
-        
+
         // Apply serial configuration
         apply_serial_config(&fd, &config)?;
-        
+
         // Make the fd non-blocking
         use rustix::fs::{fcntl_getfl, fcntl_setfl};
         let flags = fcntl_getfl(&fd)
@@ -322,9 +331,7 @@ impl AsyncRead for SerialReader {
                     Ok(n) => {
                         buf.advance(n);
                         if n > 0 {
-                            self.inner
-                                .bytes_read
-                                .fetch_add(n as u64, Ordering::Relaxed);
+                            self.inner.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
                         }
                         Ok(())
                     }
@@ -333,11 +340,17 @@ impl AsyncRead for SerialReader {
                     }
                     Err(rustix::io::Errno::IO) => {
                         // EIO can mean various hardware errors, not just disconnection
-                        Err(io::Error::new(io::ErrorKind::Other, SerialError::HardwareError))
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            SerialError::HardwareError,
+                        ))
                     }
                     Err(rustix::io::Errno::PIPE) => {
                         // EPIPE is more likely to indicate disconnection
-                        Err(io::Error::new(io::ErrorKind::BrokenPipe, SerialError::Disconnected))
+                        Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            SerialError::Disconnected,
+                        ))
                     }
                     Err(e) => Err(e.into()),
                 }
@@ -377,11 +390,17 @@ impl AsyncWrite for SerialWriter {
                     }
                     Err(rustix::io::Errno::IO) => {
                         // EIO can mean various hardware errors, not just disconnection
-                        Err(io::Error::new(io::ErrorKind::Other, SerialError::HardwareError))
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            SerialError::HardwareError,
+                        ))
                     }
                     Err(rustix::io::Errno::PIPE) => {
                         // EPIPE is more likely to indicate disconnection
-                        Err(io::Error::new(io::ErrorKind::BrokenPipe, SerialError::Disconnected))
+                        Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            SerialError::Disconnected,
+                        ))
                     }
                     Err(e) => Err(e.into()),
                 }
@@ -422,7 +441,7 @@ impl SerialControl {
     pub fn set_baud_rate(&self, baud_rate: u32) -> Result<(), SerialError> {
         // 5 seconds is extremely generous for acquiring a lock
         const TIMEOUT: Duration = Duration::from_secs(5);
-        
+
         // Try to acquire lock with timeout
         let _lock = match self.inner.reconfig_lock.try_write_for(TIMEOUT) {
             Some(guard) => guard,
@@ -441,7 +460,8 @@ impl SerialControl {
             .map_err(|e| SerialError::ConfigError(format!("Failed to get termios: {}", e)))?;
 
         // Update baud rate
-        termios.set_speed(baud_rate)
+        termios
+            .set_speed(baud_rate)
             .map_err(|e| SerialError::ConfigError(format!("Failed to set baud rate: {}", e)))?;
 
         // Apply changes immediately
@@ -516,17 +536,16 @@ impl Drop for SerialInner {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_apply_serial_config_validation() {
         use nix::pty::openpty;
-        
+
         // Create a PTY pair for testing
         let result = openpty(None, None);
         if let Ok(pty) = result {
@@ -534,10 +553,10 @@ mod tests {
             let config = SerialConfig::default();
             let result = apply_serial_config(&pty.master, &config);
             assert!(result.is_ok(), "Default config should be valid");
-            
+
             // Need new pty for each test since fd gets consumed
             let pty = openpty(None, None).unwrap();
-            
+
             // Test valid custom config
             let config = SerialConfig {
                 baud_rate: 9600,
@@ -547,7 +566,7 @@ mod tests {
             };
             let result = apply_serial_config(&pty.master, &config);
             assert!(result.is_ok(), "Custom valid config should work");
-            
+
             // Test invalid data bits
             let pty = openpty(None, None).unwrap();
             let config = SerialConfig {
@@ -559,7 +578,7 @@ mod tests {
             if let Err(SerialError::ConfigError(msg)) = result {
                 assert!(msg.contains("Invalid data bits: 9"));
             }
-            
+
             // Test invalid stop bits
             let pty = openpty(None, None).unwrap();
             let config = SerialConfig {
@@ -571,7 +590,7 @@ mod tests {
             if let Err(SerialError::ConfigError(msg)) = result {
                 assert!(msg.contains("Invalid stop bits: 3"));
             }
-            
+
             // Test all valid data bit values
             for data_bits in [5, 6, 7, 8] {
                 let pty = openpty(None, None).unwrap();
@@ -582,7 +601,7 @@ mod tests {
                 let result = apply_serial_config(&pty.master, &config);
                 assert!(result.is_ok(), "Data bits {} should be valid", data_bits);
             }
-            
+
             // Test all parity options
             for parity in [Parity::None, Parity::Odd, Parity::Even] {
                 let pty = openpty(None, None).unwrap();
@@ -595,7 +614,6 @@ mod tests {
             }
         }
     }
-
 
     // Test helper to create virtual serial port pairs
     pub mod test_support {
@@ -619,11 +637,13 @@ mod tests {
 
             Ok((master_stream, slave_stream))
         }
-
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[cfg_attr(feature = "skip-pty-tests", ignore = "PTY tests skipped via feature flag")]
+    #[cfg_attr(
+        feature = "skip-pty-tests",
+        ignore = "PTY tests skipped via feature flag"
+    )]
     async fn test_virtual_serial_pair() {
         use test_support::create_virtual_pair;
 
@@ -651,7 +671,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[cfg_attr(feature = "skip-pty-tests", ignore = "PTY tests skipped via feature flag")]
+    #[cfg_attr(
+        feature = "skip-pty-tests",
+        ignore = "PTY tests skipped via feature flag"
+    )]
     async fn test_concurrent_read_write() {
         use test_support::create_virtual_pair;
 
@@ -680,8 +703,10 @@ mod tests {
                 // Read some data
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(500),
-                    reader.read(&mut buf[total_read..])
-                ).await {
+                    reader.read(&mut buf[total_read..]),
+                )
+                .await
+                {
                     Ok(Ok(n)) if n > 0 => total_read += n,
                     _ => break, // Timeout or EOF
                 }
@@ -698,8 +723,10 @@ mod tests {
                 // Read some data
                 match tokio::time::timeout(
                     tokio::time::Duration::from_millis(500),
-                    reader.read(&mut buf[total_read..])
-                ).await {
+                    reader.read(&mut buf[total_read..]),
+                )
+                .await
+                {
                     Ok(Ok(n)) if n > 0 => total_read += n,
                     _ => break, // Timeout or EOF
                 }
@@ -720,8 +747,16 @@ mod tests {
         write_task.await.unwrap();
         let bytes_read_a = read_task_a.await.unwrap();
         let bytes_read_b = read_task_b.await.unwrap();
-        assert!(bytes_read_a >= 70, "Expected at least 70 bytes from A, got {}", bytes_read_a);
-        assert!(bytes_read_b >= 90, "Expected at least 90 bytes from B, got {}", bytes_read_b);
+        assert!(
+            bytes_read_a >= 70,
+            "Expected at least 70 bytes from A, got {}",
+            bytes_read_a
+        );
+        assert!(
+            bytes_read_b >= 90,
+            "Expected at least 90 bytes from B, got {}",
+            bytes_read_b
+        );
     }
 
     #[tokio::test]
@@ -776,7 +811,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "skip-pty-tests", ignore = "PTY tests skipped via feature flag")]
+    #[cfg_attr(
+        feature = "skip-pty-tests",
+        ignore = "PTY tests skipped via feature flag"
+    )]
     async fn test_disconnection_handling() {
         use test_support::create_virtual_pair;
 
@@ -789,17 +827,15 @@ mod tests {
         // Try to read - should eventually fail or timeout
         let mut reader_a = reader_a;
         let mut buf = vec![0u8; 10];
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            reader_a.read(&mut buf)
-        ).await;
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), reader_a.read(&mut buf)).await;
 
         // On pty disconnection, we might get Ok(0), an error, or timeout
         match result {
             Ok(Ok(0)) => {} // EOF
             Ok(Ok(_)) => panic!("Should not read data from disconnected port"),
             Ok(Err(_)) => {} // Expected error
-            Err(_) => {} // Timeout is also acceptable for disconnected PTY
+            Err(_) => {}     // Timeout is also acceptable for disconnected PTY
         }
     }
 
@@ -860,7 +896,7 @@ mod tests {
     fn test_invalid_configurations() {
         // Since we can't easily test with real device paths,
         // let's at least verify the SerialConfig validation logic
-        
+
         // Valid configurations should be accepted
         let valid_config = SerialConfig::default();
         assert_eq!(valid_config.data_bits, 8);
@@ -881,14 +917,14 @@ mod tests {
         // The actual validation happens in with_config when it tries to
         // configure termios. Since we can't test that without a real device,
         // we'll test the from_fd path which does the same validation
-        
+
         use nix::pty::openpty;
-        
+
         // Create a PTY pair for testing
         let result = openpty(None, None);
         if let Ok(pty) = result {
             let master_fd = pty.master.into_raw_fd();
-            
+
             // Test invalid data bits
             let config = SerialConfig {
                 data_bits: 9,
@@ -903,7 +939,7 @@ mod tests {
             // We need a new fd since the previous one was consumed
             let result = openpty(None, None).unwrap();
             let master_fd = result.master.into_raw_fd();
-            
+
             // Test invalid stop bits
             let config = SerialConfig {
                 stop_bits: 3,
@@ -918,7 +954,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(feature = "skip-pty-tests", ignore = "PTY tests skipped via feature flag")]
+    #[cfg_attr(
+        feature = "skip-pty-tests",
+        ignore = "PTY tests skipped via feature flag"
+    )]
     async fn test_drop_during_io() {
         use test_support::create_virtual_pair;
         use tokio::time::sleep;
@@ -940,14 +979,12 @@ mod tests {
             let mut buf = vec![0u8; 1024];
             let mut total_read = 0;
             loop {
-                match tokio::time::timeout(
-                    Duration::from_millis(100),
-                    reader.read(&mut buf)
-                ).await {
+                match tokio::time::timeout(Duration::from_millis(100), reader.read(&mut buf)).await
+                {
                     Ok(Ok(0)) => break, // EOF
                     Ok(Ok(n)) => total_read += n,
                     Ok(Err(_)) => break, // Error (including disconnection)
-                    Err(_) => break, // Timeout - likely disconnected
+                    Err(_) => break,     // Timeout - likely disconnected
                 }
             }
             total_read

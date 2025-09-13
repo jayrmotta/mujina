@@ -58,7 +58,7 @@ impl Tps546Config {
             vout_scale_loop: 0.25,
             vout_min: 1.0,
             vout_max: 2.0,
-            vout_command: 1.15,  // BM1370 default voltage
+            vout_command: 1.15, // BM1370 default voltage
             iout_oc_warn_limit: 25.0,
             iout_oc_fault_limit: 30.0,
         }
@@ -96,23 +96,40 @@ impl<I2C: I2c> Tps546<I2C> {
         self.verify_device_id().await?;
 
         // Turn off output during configuration
-        self.write_byte(pmbus::commands::OPERATION, pmbus::operation::OFF_IMMEDIATE).await?;
+        self.write_byte(pmbus::commands::OPERATION, pmbus::operation::OFF_IMMEDIATE)
+            .await?;
         debug!("Power output turned off");
 
         // Configure ON_OFF_CONFIG immediately after turning off (esp-miner sequence)
+        // Using same configuration as esp-miner - both CONTROL pin and OPERATION command
         let on_off_val = pmbus::on_off_config::DELAY
             | pmbus::on_off_config::POLARITY
             | pmbus::on_off_config::CP
             | pmbus::on_off_config::CMD
             | pmbus::on_off_config::PU;
-        self.write_byte(pmbus::commands::ON_OFF_CONFIG, on_off_val).await?;
+        self.write_byte(pmbus::commands::ON_OFF_CONFIG, on_off_val)
+            .await?;
         let mut config_desc = Vec::new();
-        if on_off_val & pmbus::on_off_config::PU != 0 { config_desc.push("PowerUp from CONTROL"); }
-        if on_off_val & pmbus::on_off_config::CMD != 0 { config_desc.push("OPERATION cmd enabled"); }
-        if on_off_val & pmbus::on_off_config::CP != 0 { config_desc.push("CONTROL pin present"); }
-        if on_off_val & pmbus::on_off_config::POLARITY != 0 { config_desc.push("Active high"); }
-        if on_off_val & pmbus::on_off_config::DELAY != 0 { config_desc.push("Turn-off delay enabled"); }
-        debug!("ON_OFF_CONFIG set to 0x{:02X} ({})", on_off_val, config_desc.join(", "));
+        if on_off_val & pmbus::on_off_config::PU != 0 {
+            config_desc.push("PowerUp from CONTROL");
+        }
+        if on_off_val & pmbus::on_off_config::CMD != 0 {
+            config_desc.push("OPERATION cmd enabled");
+        }
+        if on_off_val & pmbus::on_off_config::CP != 0 {
+            config_desc.push("CONTROL pin present");
+        }
+        if on_off_val & pmbus::on_off_config::POLARITY != 0 {
+            config_desc.push("Active high");
+        }
+        if on_off_val & pmbus::on_off_config::DELAY != 0 {
+            config_desc.push("Turn-off delay enabled");
+        }
+        debug!(
+            "ON_OFF_CONFIG set to 0x{:02X} ({})",
+            on_off_val,
+            config_desc.join(", ")
+        );
 
         // Read VOUT_MODE to verify data format (esp-miner does this)
         let vout_mode = self.read_byte(pmbus::commands::VOUT_MODE).await?;
@@ -127,7 +144,11 @@ impl<I2C: I2c> Tps546<I2C> {
         if status_desc.is_empty() {
             debug!("STATUS_WORD after config: 0x{:04X}", status);
         } else {
-            debug!("STATUS_WORD after config: 0x{:04X} ({})", status, status_desc.join(", "));
+            debug!(
+                "STATUS_WORD after config: 0x{:04X} ({})",
+                status,
+                status_desc.join(", ")
+            );
         }
 
         Ok(())
@@ -143,12 +164,18 @@ impl<I2C: I2c> Tps546<I2C> {
 
         // Switching frequency (650 kHz)
         trace!("Setting FREQUENCY: 650kHz");
-        self.write_word(pmbus::commands::FREQUENCY_SWITCH, self.int_to_slinear11(650))
-            .await?;
+        self.write_word(
+            pmbus::commands::FREQUENCY_SWITCH,
+            self.int_to_slinear11(650),
+        )
+        .await?;
 
         // Input voltage thresholds (handle UV_WARN_LIMIT bug like esp-miner)
         if self.config.vin_uv_warn_limit > 0.0 {
-            trace!("Setting VIN_UV_WARN_LIMIT: {:.2}V", self.config.vin_uv_warn_limit);
+            trace!(
+                "Setting VIN_UV_WARN_LIMIT: {:.2}V",
+                self.config.vin_uv_warn_limit
+            );
             self.write_word(
                 pmbus::commands::VIN_UV_WARN_LIMIT,
                 self.float_to_slinear11(self.config.vin_uv_warn_limit),
@@ -157,8 +184,11 @@ impl<I2C: I2c> Tps546<I2C> {
         }
 
         trace!("Setting VIN_ON: {:.2}V", self.config.vin_on);
-        self.write_word(pmbus::commands::VIN_ON, self.float_to_slinear11(self.config.vin_on))
-            .await?;
+        self.write_word(
+            pmbus::commands::VIN_ON,
+            self.float_to_slinear11(self.config.vin_on),
+        )
+        .await?;
 
         trace!("Setting VIN_OFF: {:.2}V", self.config.vin_off);
         self.write_word(
@@ -167,7 +197,10 @@ impl<I2C: I2c> Tps546<I2C> {
         )
         .await?;
 
-        trace!("Setting VIN_OV_FAULT_LIMIT: {:.2}V", self.config.vin_ov_fault_limit);
+        trace!(
+            "Setting VIN_OV_FAULT_LIMIT: {:.2}V",
+            self.config.vin_ov_fault_limit
+        );
         self.write_word(
             pmbus::commands::VIN_OV_FAULT_LIMIT,
             self.float_to_slinear11(self.config.vin_ov_fault_limit),
@@ -176,9 +209,15 @@ impl<I2C: I2c> Tps546<I2C> {
 
         // VIN_OV_FAULT_RESPONSE (0xB7 = shutdown with 4 retries, 182ms delay)
         const VIN_OV_FAULT_RESPONSE: u8 = 0xB7;
-        trace!("Setting VIN_OV_FAULT_RESPONSE: 0x{:02X} (shutdown, 4 retries, 182ms delay)", VIN_OV_FAULT_RESPONSE);
-        self.write_byte(pmbus::commands::VIN_OV_FAULT_RESPONSE, VIN_OV_FAULT_RESPONSE)
-            .await?;
+        trace!(
+            "Setting VIN_OV_FAULT_RESPONSE: 0x{:02X} (shutdown, 4 retries, 182ms delay)",
+            VIN_OV_FAULT_RESPONSE
+        );
+        self.write_byte(
+            pmbus::commands::VIN_OV_FAULT_RESPONSE,
+            VIN_OV_FAULT_RESPONSE,
+        )
+        .await?;
 
         // Output voltage configuration
         trace!("Setting VOUT SCALE: {:.2}", self.config.vout_scale_loop);
@@ -190,7 +229,8 @@ impl<I2C: I2c> Tps546<I2C> {
 
         trace!("Setting VOUT_COMMAND: {:.2}V", self.config.vout_command);
         let vout_command = self.float_to_ulinear16(self.config.vout_command).await?;
-        self.write_word(pmbus::commands::VOUT_COMMAND, vout_command).await?;
+        self.write_word(pmbus::commands::VOUT_COMMAND, vout_command)
+            .await?;
 
         trace!("Setting VOUT_MAX: {:.2}V", self.config.vout_max);
         let vout_max = self.float_to_ulinear16(self.config.vout_max).await?;
@@ -210,38 +250,50 @@ impl<I2C: I2c> Tps546<I2C> {
 
         trace!("Setting VOUT_OV_FAULT_LIMIT: {:.2}", VOUT_OV_FAULT_LIMIT);
         let vout_ov_fault = self.float_to_ulinear16(VOUT_OV_FAULT_LIMIT).await?;
-        self.write_word(pmbus::commands::VOUT_OV_FAULT_LIMIT, vout_ov_fault).await?;
+        self.write_word(pmbus::commands::VOUT_OV_FAULT_LIMIT, vout_ov_fault)
+            .await?;
 
         trace!("Setting VOUT_OV_WARN_LIMIT: {:.2}", VOUT_OV_WARN_LIMIT);
         let vout_ov_warn = self.float_to_ulinear16(VOUT_OV_WARN_LIMIT).await?;
-        self.write_word(pmbus::commands::VOUT_OV_WARN_LIMIT, vout_ov_warn).await?;
+        self.write_word(pmbus::commands::VOUT_OV_WARN_LIMIT, vout_ov_warn)
+            .await?;
 
         trace!("Setting VOUT_MARGIN_HIGH: {:.2}", VOUT_MARGIN_HIGH);
         let vout_margin_high = self.float_to_ulinear16(VOUT_MARGIN_HIGH).await?;
-        self.write_word(pmbus::commands::VOUT_MARGIN_HIGH, vout_margin_high).await?;
+        self.write_word(pmbus::commands::VOUT_MARGIN_HIGH, vout_margin_high)
+            .await?;
 
         trace!("Setting VOUT_MARGIN_LOW: {:.2}", VOUT_MARGIN_LOW);
         let vout_margin_low = self.float_to_ulinear16(VOUT_MARGIN_LOW).await?;
-        self.write_word(pmbus::commands::VOUT_MARGIN_LOW, vout_margin_low).await?;
+        self.write_word(pmbus::commands::VOUT_MARGIN_LOW, vout_margin_low)
+            .await?;
 
         trace!("Setting VOUT_UV_WARN_LIMIT: {:.2}", VOUT_UV_WARN_LIMIT);
         let vout_uv_warn = self.float_to_ulinear16(VOUT_UV_WARN_LIMIT).await?;
-        self.write_word(pmbus::commands::VOUT_UV_WARN_LIMIT, vout_uv_warn).await?;
+        self.write_word(pmbus::commands::VOUT_UV_WARN_LIMIT, vout_uv_warn)
+            .await?;
 
         trace!("Setting VOUT_UV_FAULT_LIMIT: {:.2}", VOUT_UV_FAULT_LIMIT);
         let vout_uv_fault = self.float_to_ulinear16(VOUT_UV_FAULT_LIMIT).await?;
-        self.write_word(pmbus::commands::VOUT_UV_FAULT_LIMIT, vout_uv_fault).await?;
+        self.write_word(pmbus::commands::VOUT_UV_FAULT_LIMIT, vout_uv_fault)
+            .await?;
 
         // Output current protection
         trace!("----- IOUT");
-        trace!("Setting IOUT_OC_WARN_LIMIT: {:.2}A", self.config.iout_oc_warn_limit);
+        trace!(
+            "Setting IOUT_OC_WARN_LIMIT: {:.2}A",
+            self.config.iout_oc_warn_limit
+        );
         self.write_word(
             pmbus::commands::IOUT_OC_WARN_LIMIT,
             self.float_to_slinear11(self.config.iout_oc_warn_limit),
         )
         .await?;
 
-        trace!("Setting IOUT_OC_FAULT_LIMIT: {:.2}A", self.config.iout_oc_fault_limit);
+        trace!(
+            "Setting IOUT_OC_FAULT_LIMIT: {:.2}A",
+            self.config.iout_oc_fault_limit
+        );
         self.write_word(
             pmbus::commands::IOUT_OC_FAULT_LIMIT,
             self.float_to_slinear11(self.config.iout_oc_fault_limit),
@@ -250,9 +302,15 @@ impl<I2C: I2c> Tps546<I2C> {
 
         // IOUT_OC_FAULT_RESPONSE (0xC0 = shutdown immediately, no retries)
         const IOUT_OC_FAULT_RESPONSE: u8 = 0xC0;
-        trace!("Setting IOUT_OC_FAULT_RESPONSE: 0x{:02X} (shutdown immediately, no retries)", IOUT_OC_FAULT_RESPONSE);
-        self.write_byte(pmbus::commands::IOUT_OC_FAULT_RESPONSE, IOUT_OC_FAULT_RESPONSE)
-            .await?;
+        trace!(
+            "Setting IOUT_OC_FAULT_RESPONSE: 0x{:02X} (shutdown immediately, no retries)",
+            IOUT_OC_FAULT_RESPONSE
+        );
+        self.write_byte(
+            pmbus::commands::IOUT_OC_FAULT_RESPONSE,
+            IOUT_OC_FAULT_RESPONSE,
+        )
+        .await?;
 
         // Temperature protection
         trace!("----- TEMPERATURE");
@@ -261,12 +319,21 @@ impl<I2C: I2c> Tps546<I2C> {
         const OT_FAULT_RESPONSE: u8 = 0xFF; // Infinite retries
 
         trace!("Setting OT_WARN_LIMIT: {}°C", OT_WARN_LIMIT);
-        self.write_word(pmbus::commands::OT_WARN_LIMIT, self.int_to_slinear11(OT_WARN_LIMIT))
-            .await?;
+        self.write_word(
+            pmbus::commands::OT_WARN_LIMIT,
+            self.int_to_slinear11(OT_WARN_LIMIT),
+        )
+        .await?;
         trace!("Setting OT_FAULT_LIMIT: {}°C", OT_FAULT_LIMIT);
-        self.write_word(pmbus::commands::OT_FAULT_LIMIT, self.int_to_slinear11(OT_FAULT_LIMIT))
-            .await?;
-        trace!("Setting OT_FAULT_RESPONSE: 0x{:02X} (infinite retries, wait for cooling)", OT_FAULT_RESPONSE);
+        self.write_word(
+            pmbus::commands::OT_FAULT_LIMIT,
+            self.int_to_slinear11(OT_FAULT_LIMIT),
+        )
+        .await?;
+        trace!(
+            "Setting OT_FAULT_RESPONSE: 0x{:02X} (infinite retries, wait for cooling)",
+            OT_FAULT_RESPONSE
+        );
         self.write_byte(pmbus::commands::OT_FAULT_RESPONSE, OT_FAULT_RESPONSE)
             .await?;
 
@@ -291,12 +358,21 @@ impl<I2C: I2c> Tps546<I2C> {
             self.int_to_slinear11(TON_MAX_FAULT_LIMIT),
         )
         .await?;
-        trace!("Setting TON_MAX_FAULT_RESPONSE: 0x{:02X} (3 retries, 91ms delay)", TON_MAX_FAULT_RESPONSE);
-        self.write_byte(pmbus::commands::TON_MAX_FAULT_RESPONSE, TON_MAX_FAULT_RESPONSE)
-            .await?;
+        trace!(
+            "Setting TON_MAX_FAULT_RESPONSE: 0x{:02X} (3 retries, 91ms delay)",
+            TON_MAX_FAULT_RESPONSE
+        );
+        self.write_byte(
+            pmbus::commands::TON_MAX_FAULT_RESPONSE,
+            TON_MAX_FAULT_RESPONSE,
+        )
+        .await?;
         trace!("Setting TOFF_DELAY: {}ms", TOFF_DELAY);
-        self.write_word(pmbus::commands::TOFF_DELAY, self.int_to_slinear11(TOFF_DELAY))
-            .await?;
+        self.write_word(
+            pmbus::commands::TOFF_DELAY,
+            self.int_to_slinear11(TOFF_DELAY),
+        )
+        .await?;
         trace!("Setting TOFF_FALL: {}ms", TOFF_FALL);
         self.write_word(pmbus::commands::TOFF_FALL, self.int_to_slinear11(TOFF_FALL))
             .await?;
@@ -315,7 +391,11 @@ impl<I2C: I2c> Tps546<I2C> {
     async fn verify_device_id(&mut self) -> Result<()> {
         let mut id_data = vec![0u8; 7]; // Length byte + 6 ID bytes
         self.i2c
-            .write_read(TPS546_I2C_ADDR, &[pmbus::commands::IC_DEVICE_ID], &mut id_data)
+            .write_read(
+                TPS546_I2C_ADDR,
+                &[pmbus::commands::IC_DEVICE_ID],
+                &mut id_data,
+            )
             .await?;
 
         // First byte is length, actual ID starts at byte 1
@@ -345,7 +425,8 @@ impl<I2C: I2c> Tps546<I2C> {
     pub async fn set_vout(&mut self, volts: f32) -> Result<()> {
         if volts == 0.0 {
             // Turn off output
-            self.write_byte(pmbus::commands::OPERATION, pmbus::operation::OFF_IMMEDIATE).await?;
+            self.write_byte(pmbus::commands::OPERATION, pmbus::operation::OFF_IMMEDIATE)
+                .await?;
             info!("Output voltage turned off");
         } else {
             // Check voltage range
@@ -359,16 +440,42 @@ impl<I2C: I2c> Tps546<I2C> {
 
             // Set voltage
             let value = self.float_to_ulinear16(volts).await?;
-            self.write_word(pmbus::commands::VOUT_COMMAND, value).await?;
+            self.write_word(pmbus::commands::VOUT_COMMAND, value)
+                .await?;
             debug!("Output voltage set to {:.2}V", volts);
 
+            // Clear any faults before turning on
+            self.clear_faults().await?;
+            debug!("Cleared faults before turn-on");
+
             // Turn on output
-            self.write_byte(pmbus::commands::OPERATION, pmbus::operation::ON).await?;
+            self.write_byte(pmbus::commands::OPERATION, pmbus::operation::ON)
+                .await?;
 
             // Verify operation
             let op_val = self.read_byte(pmbus::commands::OPERATION).await?;
             if op_val != pmbus::operation::ON {
                 error!("Failed to turn on output, OPERATION = 0x{:02X}", op_val);
+            } else {
+                debug!("Power turned ON successfully, OPERATION = 0x{:02X}", op_val);
+            }
+
+            // Check immediate status after turn-on
+            let status = self.read_word(pmbus::commands::STATUS_WORD).await?;
+            if status & pmbus::status_word::OFF != 0 {
+                error!(
+                    "WARNING: Power is still OFF after turn-on command! STATUS_WORD = 0x{:04X}",
+                    status
+                );
+                // Read all status registers to understand why
+                if let Ok(vout_status) = self.read_byte(pmbus::commands::STATUS_VOUT).await {
+                    error!("  STATUS_VOUT: 0x{:02X}", vout_status);
+                }
+                if let Ok(iout_status) = self.read_byte(pmbus::commands::STATUS_IOUT).await {
+                    error!("  STATUS_IOUT: 0x{:02X}", iout_status);
+                }
+            } else {
+                debug!("Power is ON, STATUS_WORD = 0x{:04X}", status);
             }
         }
         Ok(())
@@ -428,10 +535,16 @@ impl<I2C: I2c> Tps546<I2C> {
         if status & pmbus::status_word::VOUT != 0 {
             let vout_status = self.read_byte(pmbus::commands::STATUS_VOUT).await?;
             let desc = self.decode_status_vout(vout_status);
-            
+
             // OV and UV faults are critical - the output is not within safe operating range
-            if vout_status & (pmbus::status_vout::VOUT_OV_FAULT | pmbus::status_vout::VOUT_UV_FAULT) != 0 {
-                error!("CRITICAL: VOUT fault detected: 0x{:02X} ({})", vout_status, desc.join(", "));
+            if vout_status & (pmbus::status_vout::VOUT_OV_FAULT | pmbus::status_vout::VOUT_UV_FAULT)
+                != 0
+            {
+                error!(
+                    "CRITICAL: VOUT fault detected: 0x{:02X} ({})",
+                    vout_status,
+                    desc.join(", ")
+                );
                 critical_faults.push(format!("VOUT fault: {}", desc.join(", ")));
             } else {
                 warn!("VOUT warning: 0x{:02X} ({})", vout_status, desc.join(", "));
@@ -443,10 +556,14 @@ impl<I2C: I2c> Tps546<I2C> {
         if status & pmbus::status_word::IOUT != 0 {
             let iout_status = self.read_byte(pmbus::commands::STATUS_IOUT).await?;
             let desc = self.decode_status_iout(iout_status);
-            
+
             // Overcurrent fault is critical - can damage hardware
             if iout_status & pmbus::status_iout::IOUT_OC_FAULT != 0 {
-                error!("CRITICAL: IOUT overcurrent fault detected: 0x{:02X} ({})", iout_status, desc.join(", "));
+                error!(
+                    "CRITICAL: IOUT overcurrent fault detected: 0x{:02X} ({})",
+                    iout_status,
+                    desc.join(", ")
+                );
                 critical_faults.push(format!("IOUT overcurrent: {}", desc.join(", ")));
             } else {
                 warn!("IOUT warning: 0x{:02X} ({})", iout_status, desc.join(", "));
@@ -458,15 +575,26 @@ impl<I2C: I2c> Tps546<I2C> {
         if status & pmbus::status_word::INPUT != 0 {
             let input_status = self.read_byte(pmbus::commands::STATUS_INPUT).await?;
             let desc = self.decode_status_input(input_status);
-            
+
             // Unit off due to low input or UV/OV faults are critical
-            if input_status & (pmbus::status_input::UNIT_OFF_VIN_LOW | 
-                              pmbus::status_input::VIN_UV_FAULT | 
-                              pmbus::status_input::VIN_OV_FAULT) != 0 {
-                error!("CRITICAL: INPUT fault detected: 0x{:02X} ({})", input_status, desc.join(", "));
+            if input_status
+                & (pmbus::status_input::UNIT_OFF_VIN_LOW
+                    | pmbus::status_input::VIN_UV_FAULT
+                    | pmbus::status_input::VIN_OV_FAULT)
+                != 0
+            {
+                error!(
+                    "CRITICAL: INPUT fault detected: 0x{:02X} ({})",
+                    input_status,
+                    desc.join(", ")
+                );
                 critical_faults.push(format!("INPUT fault: {}", desc.join(", ")));
             } else {
-                warn!("INPUT warning: 0x{:02X} ({})", input_status, desc.join(", "));
+                warn!(
+                    "INPUT warning: 0x{:02X} ({})",
+                    input_status,
+                    desc.join(", ")
+                );
                 warnings.push(format!("INPUT warning: {}", desc.join(", ")));
             }
         }
@@ -475,13 +603,21 @@ impl<I2C: I2c> Tps546<I2C> {
         if status & pmbus::status_word::TEMP != 0 {
             let temp_status = self.read_byte(pmbus::commands::STATUS_TEMPERATURE).await?;
             let desc = self.decode_status_temp(temp_status);
-            
+
             // Overtemperature fault is critical
             if temp_status & pmbus::status_temperature::OT_FAULT != 0 {
-                error!("CRITICAL: Overtemperature fault detected: 0x{:02X} ({})", temp_status, desc.join(", "));
+                error!(
+                    "CRITICAL: Overtemperature fault detected: 0x{:02X} ({})",
+                    temp_status,
+                    desc.join(", ")
+                );
                 critical_faults.push(format!("Overtemperature: {}", desc.join(", ")));
             } else {
-                warn!("TEMPERATURE warning: 0x{:02X} ({})", temp_status, desc.join(", "));
+                warn!(
+                    "TEMPERATURE warning: 0x{:02X} ({})",
+                    temp_status,
+                    desc.join(", ")
+                );
                 warnings.push(format!("TEMP warning: {}", desc.join(", ")));
             }
         }
@@ -490,13 +626,71 @@ impl<I2C: I2c> Tps546<I2C> {
         if status & pmbus::status_word::CML != 0 {
             let cml_status = self.read_byte(pmbus::commands::STATUS_CML).await?;
             let desc = self.decode_status_cml(cml_status);
-            error!("CRITICAL: CML fault detected: 0x{:02X} ({})", cml_status, desc.join(", "));
+            error!(
+                "CRITICAL: CML fault detected: 0x{:02X} ({})",
+                cml_status,
+                desc.join(", ")
+            );
             critical_faults.push(format!("CML fault: {}", desc.join(", ")));
         }
 
         // Check if unit is OFF (critical - means power has shut down)
         if status & pmbus::status_word::OFF != 0 {
-            error!("CRITICAL: Power controller is OFF");
+            error!(
+                "CRITICAL: Power controller is OFF - Reading all status registers for diagnostics"
+            );
+
+            // Read ALL status registers to understand why it shut off
+            error!("STATUS_WORD: 0x{:04X}", status);
+
+            // Always read these status bytes when OFF to understand the fault
+            if let Ok(vout_status) = self.read_byte(pmbus::commands::STATUS_VOUT).await {
+                let desc = self.decode_status_vout(vout_status);
+                error!("  STATUS_VOUT: 0x{:02X} ({})", vout_status, desc.join(", "));
+            }
+
+            if let Ok(iout_status) = self.read_byte(pmbus::commands::STATUS_IOUT).await {
+                let desc = self.decode_status_iout(iout_status);
+                error!("  STATUS_IOUT: 0x{:02X} ({})", iout_status, desc.join(", "));
+            }
+
+            if let Ok(input_status) = self.read_byte(pmbus::commands::STATUS_INPUT).await {
+                let desc = self.decode_status_input(input_status);
+                error!(
+                    "  STATUS_INPUT: 0x{:02X} ({})",
+                    input_status,
+                    desc.join(", ")
+                );
+            }
+
+            if let Ok(temp_status) = self.read_byte(pmbus::commands::STATUS_TEMPERATURE).await {
+                let desc = self.decode_status_temp(temp_status);
+                error!(
+                    "  STATUS_TEMPERATURE: 0x{:02X} ({})",
+                    temp_status,
+                    desc.join(", ")
+                );
+            }
+
+            if let Ok(cml_status) = self.read_byte(pmbus::commands::STATUS_CML).await {
+                let desc = self.decode_status_cml(cml_status);
+                error!("  STATUS_CML: 0x{:02X} ({})", cml_status, desc.join(", "));
+            }
+
+            // Also read current telemetry
+            if let Ok(vout_mv) = self.get_vout().await {
+                error!("  Current VOUT: {:.3}V", vout_mv as f32 / 1000.0);
+            }
+            if let Ok(iout_ma) = self.get_iout().await {
+                error!("  Current IOUT: {:.2}A", iout_ma as f32 / 1000.0);
+            }
+            if let Ok(vin_mv) = self.get_vin().await {
+                error!("  Current VIN: {:.2}V", vin_mv as f32 / 1000.0);
+            }
+            if let Ok(temp) = self.get_temperature().await {
+                error!("  Current Temperature: {}°C", temp);
+            }
+
             critical_faults.push("Power controller is OFF".to_string());
         }
 
@@ -517,93 +711,154 @@ impl<I2C: I2c> Tps546<I2C> {
 
         // VIN settings
         let vin_on = self.read_word(pmbus::commands::VIN_ON).await?;
-        debug!("VIN_ON: {:.2}V (raw: 0x{:04X})",
-            self.slinear11_to_float(vin_on), vin_on);
+        debug!(
+            "VIN_ON: {:.2}V (raw: 0x{:04X})",
+            self.slinear11_to_float(vin_on),
+            vin_on
+        );
 
         let vin_off = self.read_word(pmbus::commands::VIN_OFF).await?;
-        debug!("VIN_OFF: {:.2}V (raw: 0x{:04X})",
-            self.slinear11_to_float(vin_off), vin_off);
+        debug!(
+            "VIN_OFF: {:.2}V (raw: 0x{:04X})",
+            self.slinear11_to_float(vin_off),
+            vin_off
+        );
 
         let vin_ov_fault = self.read_word(pmbus::commands::VIN_OV_FAULT_LIMIT).await?;
-        debug!("VIN_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
-            self.slinear11_to_float(vin_ov_fault), vin_ov_fault);
+        debug!(
+            "VIN_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
+            self.slinear11_to_float(vin_ov_fault),
+            vin_ov_fault
+        );
 
         let vin_uv_warn = self.read_word(pmbus::commands::VIN_UV_WARN_LIMIT).await?;
-        debug!("VIN_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
-            self.slinear11_to_float(vin_uv_warn), vin_uv_warn);
+        debug!(
+            "VIN_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
+            self.slinear11_to_float(vin_uv_warn),
+            vin_uv_warn
+        );
 
-        let vin_ov_response = self.read_byte(pmbus::commands::VIN_OV_FAULT_RESPONSE).await?;
+        let vin_ov_response = self
+            .read_byte(pmbus::commands::VIN_OV_FAULT_RESPONSE)
+            .await?;
         let vin_ov_desc = self.decode_fault_response(vin_ov_response);
-        debug!("VIN_OV_FAULT_RESPONSE: 0x{:02X} ({})", vin_ov_response, vin_ov_desc);
+        debug!(
+            "VIN_OV_FAULT_RESPONSE: 0x{:02X} ({})",
+            vin_ov_response, vin_ov_desc
+        );
 
         // VOUT settings
         let vout_max = self.read_word(pmbus::commands::VOUT_MAX).await?;
-        debug!("VOUT_MAX: {:.2}V (raw: 0x{:04X})",
-            self.ulinear16_to_float(vout_max).await?, vout_max);
+        debug!(
+            "VOUT_MAX: {:.2}V (raw: 0x{:04X})",
+            self.ulinear16_to_float(vout_max).await?,
+            vout_max
+        );
 
         let vout_ov_fault = self.read_word(pmbus::commands::VOUT_OV_FAULT_LIMIT).await?;
         let vout_ov_fault_v = self.ulinear16_to_float(vout_ov_fault).await?;
-        debug!("VOUT_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
-            vout_ov_fault_v * self.config.vout_command, vout_ov_fault);
+        debug!(
+            "VOUT_OV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
+            vout_ov_fault_v * self.config.vout_command,
+            vout_ov_fault
+        );
 
         let vout_ov_warn = self.read_word(pmbus::commands::VOUT_OV_WARN_LIMIT).await?;
         let vout_ov_warn_v = self.ulinear16_to_float(vout_ov_warn).await?;
-        debug!("VOUT_OV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
-            vout_ov_warn_v * self.config.vout_command, vout_ov_warn);
+        debug!(
+            "VOUT_OV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
+            vout_ov_warn_v * self.config.vout_command,
+            vout_ov_warn
+        );
 
         let vout_margin_high = self.read_word(pmbus::commands::VOUT_MARGIN_HIGH).await?;
         let vout_margin_high_v = self.ulinear16_to_float(vout_margin_high).await?;
-        debug!("VOUT_MARGIN_HIGH: {:.2}V (raw: 0x{:04X})",
-            vout_margin_high_v * self.config.vout_command, vout_margin_high);
+        debug!(
+            "VOUT_MARGIN_HIGH: {:.2}V (raw: 0x{:04X})",
+            vout_margin_high_v * self.config.vout_command,
+            vout_margin_high
+        );
 
         let vout_command = self.read_word(pmbus::commands::VOUT_COMMAND).await?;
-        debug!("VOUT_COMMAND: {:.2}V (raw: 0x{:04X})",
-            self.ulinear16_to_float(vout_command).await?, vout_command);
+        debug!(
+            "VOUT_COMMAND: {:.2}V (raw: 0x{:04X})",
+            self.ulinear16_to_float(vout_command).await?,
+            vout_command
+        );
 
         let vout_margin_low = self.read_word(pmbus::commands::VOUT_MARGIN_LOW).await?;
         let vout_margin_low_v = self.ulinear16_to_float(vout_margin_low).await?;
-        debug!("VOUT_MARGIN_LOW: {:.2}V (raw: 0x{:04X})",
-            vout_margin_low_v * self.config.vout_command, vout_margin_low);
+        debug!(
+            "VOUT_MARGIN_LOW: {:.2}V (raw: 0x{:04X})",
+            vout_margin_low_v * self.config.vout_command,
+            vout_margin_low
+        );
 
         let vout_uv_warn = self.read_word(pmbus::commands::VOUT_UV_WARN_LIMIT).await?;
         let vout_uv_warn_v = self.ulinear16_to_float(vout_uv_warn).await?;
-        debug!("VOUT_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
-            vout_uv_warn_v * self.config.vout_command, vout_uv_warn);
+        debug!(
+            "VOUT_UV_WARN_LIMIT: {:.2}V (raw: 0x{:04X})",
+            vout_uv_warn_v * self.config.vout_command,
+            vout_uv_warn
+        );
 
         let vout_uv_fault = self.read_word(pmbus::commands::VOUT_UV_FAULT_LIMIT).await?;
         let vout_uv_fault_v = self.ulinear16_to_float(vout_uv_fault).await?;
-        debug!("VOUT_UV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
-            vout_uv_fault_v * self.config.vout_command, vout_uv_fault);
+        debug!(
+            "VOUT_UV_FAULT_LIMIT: {:.2}V (raw: 0x{:04X})",
+            vout_uv_fault_v * self.config.vout_command,
+            vout_uv_fault
+        );
 
         let vout_min = self.read_word(pmbus::commands::VOUT_MIN).await?;
-        debug!("VOUT_MIN: {:.2}V (raw: 0x{:04X})",
-            self.ulinear16_to_float(vout_min).await?, vout_min);
+        debug!(
+            "VOUT_MIN: {:.2}V (raw: 0x{:04X})",
+            self.ulinear16_to_float(vout_min).await?,
+            vout_min
+        );
 
         // Current Configuration and Limits
         debug!("--- Current Configuration ---");
 
         let iout_oc_warn = self.read_word(pmbus::commands::IOUT_OC_WARN_LIMIT).await?;
-        debug!("IOUT_OC_WARN_LIMIT: {:.2}A (raw: 0x{:04X})",
-            self.slinear11_to_float(iout_oc_warn), iout_oc_warn);
+        debug!(
+            "IOUT_OC_WARN_LIMIT: {:.2}A (raw: 0x{:04X})",
+            self.slinear11_to_float(iout_oc_warn),
+            iout_oc_warn
+        );
 
         let iout_oc_fault = self.read_word(pmbus::commands::IOUT_OC_FAULT_LIMIT).await?;
-        debug!("IOUT_OC_FAULT_LIMIT: {:.2}A (raw: 0x{:04X})",
-            self.slinear11_to_float(iout_oc_fault), iout_oc_fault);
+        debug!(
+            "IOUT_OC_FAULT_LIMIT: {:.2}A (raw: 0x{:04X})",
+            self.slinear11_to_float(iout_oc_fault),
+            iout_oc_fault
+        );
 
-        let iout_oc_response = self.read_byte(pmbus::commands::IOUT_OC_FAULT_RESPONSE).await?;
+        let iout_oc_response = self
+            .read_byte(pmbus::commands::IOUT_OC_FAULT_RESPONSE)
+            .await?;
         let iout_oc_desc = self.decode_fault_response(iout_oc_response);
-        debug!("IOUT_OC_FAULT_RESPONSE: 0x{:02X} ({})", iout_oc_response, iout_oc_desc);
+        debug!(
+            "IOUT_OC_FAULT_RESPONSE: 0x{:02X} ({})",
+            iout_oc_response, iout_oc_desc
+        );
 
         // Temperature Configuration
         debug!("--- Temperature Configuration ---");
 
         let ot_warn = self.read_word(pmbus::commands::OT_WARN_LIMIT).await?;
-        debug!("OT_WARN_LIMIT: {}°C (raw: 0x{:04X})",
-            self.slinear11_to_int(ot_warn), ot_warn);
+        debug!(
+            "OT_WARN_LIMIT: {}°C (raw: 0x{:04X})",
+            self.slinear11_to_int(ot_warn),
+            ot_warn
+        );
 
         let ot_fault = self.read_word(pmbus::commands::OT_FAULT_LIMIT).await?;
-        debug!("OT_FAULT_LIMIT: {}°C (raw: 0x{:04X})",
-            self.slinear11_to_int(ot_fault), ot_fault);
+        debug!(
+            "OT_FAULT_LIMIT: {}°C (raw: 0x{:04X})",
+            self.slinear11_to_int(ot_fault),
+            ot_fault
+        );
 
         let ot_response = self.read_byte(pmbus::commands::OT_FAULT_RESPONSE).await?;
         let ot_desc = self.decode_fault_response(ot_response);
@@ -616,7 +871,10 @@ impl<I2C: I2c> Tps546<I2C> {
         debug!("READ_VIN: {:.2}V", self.slinear11_to_float(read_vin));
 
         let read_vout = self.read_word(pmbus::commands::READ_VOUT).await?;
-        debug!("READ_VOUT: {:.2}V", self.ulinear16_to_float(read_vout).await?);
+        debug!(
+            "READ_VOUT: {:.2}V",
+            self.ulinear16_to_float(read_vout).await?
+        );
 
         let read_iout = self.read_word(pmbus::commands::READ_IOUT).await?;
         debug!("READ_IOUT: {:.2}A", self.slinear11_to_float(read_iout));
@@ -634,11 +892,19 @@ impl<I2C: I2c> Tps546<I2C> {
         debug!("TON_RISE: {}ms", self.slinear11_to_int(ton_rise));
 
         let ton_max_fault = self.read_word(pmbus::commands::TON_MAX_FAULT_LIMIT).await?;
-        debug!("TON_MAX_FAULT_LIMIT: {}ms", self.slinear11_to_int(ton_max_fault));
+        debug!(
+            "TON_MAX_FAULT_LIMIT: {}ms",
+            self.slinear11_to_int(ton_max_fault)
+        );
 
-        let ton_max_response = self.read_byte(pmbus::commands::TON_MAX_FAULT_RESPONSE).await?;
+        let ton_max_response = self
+            .read_byte(pmbus::commands::TON_MAX_FAULT_RESPONSE)
+            .await?;
         let ton_max_desc = self.decode_fault_response(ton_max_response);
-        debug!("TON_MAX_FAULT_RESPONSE: 0x{:02X} ({})", ton_max_response, ton_max_desc);
+        debug!(
+            "TON_MAX_FAULT_RESPONSE: 0x{:02X} ({})",
+            ton_max_response, ton_max_desc
+        );
 
         let toff_delay = self.read_word(pmbus::commands::TOFF_DELAY).await?;
         debug!("TOFF_DELAY: {}ms", self.slinear11_to_int(toff_delay));
@@ -668,11 +934,24 @@ impl<I2C: I2c> Tps546<I2C> {
 
         let capability = self.read_byte(pmbus::commands::CAPABILITY).await?;
         let mut cap_desc = Vec::new();
-        if capability & 0x80 != 0 { cap_desc.push("PEC supported"); }
-        if capability & 0x40 != 0 { cap_desc.push("400kHz max"); }
-        if capability & 0x20 != 0 { cap_desc.push("Alert supported"); }
-        debug!("CAPABILITY: 0x{:02X} ({})", capability,
-            if cap_desc.is_empty() { "none".to_string() } else { cap_desc.join(", ") });
+        if capability & 0x80 != 0 {
+            cap_desc.push("PEC supported");
+        }
+        if capability & 0x40 != 0 {
+            cap_desc.push("400kHz max");
+        }
+        if capability & 0x20 != 0 {
+            cap_desc.push("Alert supported");
+        }
+        debug!(
+            "CAPABILITY: 0x{:02X} ({})",
+            capability,
+            if cap_desc.is_empty() {
+                "none".to_string()
+            } else {
+                cap_desc.join(", ")
+            }
+        );
 
         let op_val = self.read_byte(pmbus::commands::OPERATION).await?;
         let op_desc = match op_val {
@@ -687,15 +966,32 @@ impl<I2C: I2c> Tps546<I2C> {
 
         let on_off_val = self.read_byte(pmbus::commands::ON_OFF_CONFIG).await?;
         let mut on_off_desc = Vec::new();
-        if on_off_val & pmbus::on_off_config::PU != 0 { on_off_desc.push("PowerUp from CONTROL"); }
-        if on_off_val & pmbus::on_off_config::CMD != 0 { on_off_desc.push("CMD enabled"); }
-        if on_off_val & pmbus::on_off_config::CP != 0 { on_off_desc.push("CONTROL present"); }
-        if on_off_val & pmbus::on_off_config::POLARITY != 0 { on_off_desc.push("Active high"); }
-        if on_off_val & pmbus::on_off_config::DELAY != 0 { on_off_desc.push("Turn-off delay"); }
-        debug!("ON_OFF_CONFIG: 0x{:02X} ({})", on_off_val, on_off_desc.join(", "));
+        if on_off_val & pmbus::on_off_config::PU != 0 {
+            on_off_desc.push("PowerUp from CONTROL");
+        }
+        if on_off_val & pmbus::on_off_config::CMD != 0 {
+            on_off_desc.push("CMD enabled");
+        }
+        if on_off_val & pmbus::on_off_config::CP != 0 {
+            on_off_desc.push("CONTROL present");
+        }
+        if on_off_val & pmbus::on_off_config::POLARITY != 0 {
+            on_off_desc.push("Active high");
+        }
+        if on_off_val & pmbus::on_off_config::DELAY != 0 {
+            on_off_desc.push("Turn-off delay");
+        }
+        debug!(
+            "ON_OFF_CONFIG: 0x{:02X} ({})",
+            on_off_val,
+            on_off_desc.join(", ")
+        );
 
         // Compensation Configuration
-        match self.read_block(pmbus::commands::COMPENSATION_CONFIG, 5).await {
+        match self
+            .read_block(pmbus::commands::COMPENSATION_CONFIG, 5)
+            .await
+        {
             Ok(comp_config) => {
                 debug!("COMPENSATION_CONFIG: {:02X?}", comp_config);
             }
@@ -713,7 +1009,11 @@ impl<I2C: I2c> Tps546<I2C> {
         if status_desc.is_empty() {
             debug!("STATUS_WORD: 0x{:04X} (no flags set)", status_word);
         } else {
-            debug!("STATUS_WORD: 0x{:04X} ({})", status_word, status_desc.join(", "));
+            debug!(
+                "STATUS_WORD: 0x{:04X} ({})",
+                status_word,
+                status_desc.join(", ")
+            );
         }
 
         // Read detailed status registers if main status indicates issues
@@ -738,7 +1038,11 @@ impl<I2C: I2c> Tps546<I2C> {
         if status_word & pmbus::status_word::TEMP != 0 {
             let temp_status = self.read_byte(pmbus::commands::STATUS_TEMPERATURE).await?;
             let desc = self.decode_status_temp(temp_status);
-            debug!("STATUS_TEMPERATURE: 0x{:02X} ({})", temp_status, desc.join(", "));
+            debug!(
+                "STATUS_TEMPERATURE: 0x{:02X} ({})",
+                temp_status,
+                desc.join(", ")
+            );
         }
 
         if status_word & pmbus::status_word::CML != 0 {
@@ -792,9 +1096,7 @@ impl<I2C: I2c> Tps546<I2C> {
     }
 
     async fn write_byte(&mut self, command: u8, data: u8) -> Result<()> {
-        self.i2c
-            .write(TPS546_I2C_ADDR, &[command, data])
-            .await?;
+        self.i2c.write(TPS546_I2C_ADDR, &[command, data]).await?;
         Ok(())
     }
 
@@ -824,7 +1126,10 @@ impl<I2C: I2c> Tps546<I2C> {
         // First byte is the length, verify it matches what we expect
         let reported_length = buffer[0] as usize;
         if reported_length != length {
-            warn!("Block read length mismatch: expected {}, got {}", length, reported_length);
+            warn!(
+                "Block read length mismatch: expected {}, got {}",
+                length, reported_length
+            );
         }
 
         // Return just the data portion (skip length byte)

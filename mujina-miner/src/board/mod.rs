@@ -37,9 +37,9 @@ pub enum BoardEvent {
 
     /// A critical board fault occurred
     BoardFault {
-        component: String,  // e.g., "power_controller", "temperature_sensor"
-        fault: String,      // Description of the fault
-        recoverable: bool,  // Whether the board might recover
+        component: String, // e.g., "power_controller", "temperature_sensor"
+        fault: String,     // Description of the fault
+        recoverable: bool, // Whether the board might recover
     },
 }
 
@@ -114,10 +114,10 @@ pub trait Board: Send {
     /// This should be called after initialization to receive board events.
     /// Returns None if the board hasn't been initialized yet.
     fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<BoardEvent>>;
-    
+
     /// Gracefully shutdown the board.
-    /// 
-    /// This should stop all mining activity and put the hardware in a safe 
+    ///
+    /// This should stop all mining activity and put the hardware in a safe
     /// state. The exact implementation is board-specific but typically includes
     /// stopping hashing and ensuring chips are in a low-power or reset state.
     async fn shutdown(&mut self) -> Result<(), BoardError>;
@@ -181,7 +181,8 @@ impl From<ChipError> for BoardError {
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Type alias for board factory function
-pub type BoardFactoryFn = fn(UsbDeviceInfo) -> BoxFuture<'static, crate::error::Result<Box<dyn Board + Send>>>;
+pub type BoardFactoryFn =
+    fn(UsbDeviceInfo) -> BoxFuture<'static, crate::error::Result<Box<dyn Board + Send>>>;
 
 /// Board descriptor that gets collected by inventory.
 ///

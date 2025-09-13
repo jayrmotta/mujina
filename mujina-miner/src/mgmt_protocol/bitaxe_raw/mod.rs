@@ -8,8 +8,8 @@ pub mod channel;
 pub mod gpio;
 pub mod i2c;
 
-use std::io;
 use bytes::{BufMut, BytesMut};
+use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 use tracing::trace;
 
@@ -112,10 +112,10 @@ impl Packet {
     /// Encode packet to bytes
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        
+
         // Calculate total length: 2 (length) + 1 (id) + 1 (bus) + 1 (page) + 1 (command) + data
         let length = (6 + self.data.len()) as u16;
-        
+
         // Length (little-endian)
         buf.put_u16_le(length);
         // ID
@@ -128,7 +128,7 @@ impl Packet {
         buf.put_u8(self.command);
         // Data
         buf.extend_from_slice(&self.data);
-        
+
         buf
     }
 }
@@ -231,15 +231,22 @@ impl Decoder for ControlCodec {
 
         // Peek at length without consuming
         let length_field = u16::from_le_bytes([src[0], src[1]]) as usize;
-        
+
         // In bitaxe-raw, the length field contains the length of the response data only,
         // NOT including the 2-byte length field itself or the 1-byte ID.
         // Total packet size = 2 (length) + 1 (ID) + length_field
         let total_packet_size = 2 + 1 + length_field;
-        
-        trace!("Control decoder: received {} bytes, length field = {}, total packet size = {}", 
-               src.len(), length_field, total_packet_size);
-        trace!("Control decoder: raw bytes = {:02x?}", &src[..std::cmp::min(src.len(), 10)]);
+
+        trace!(
+            "Control decoder: received {} bytes, length field = {}, total packet size = {}",
+            src.len(),
+            length_field,
+            total_packet_size
+        );
+        trace!(
+            "Control decoder: raw bytes = {:02x?}",
+            &src[..std::cmp::min(src.len(), 10)]
+        );
 
         if total_packet_size > self.max_length {
             return Err(io::Error::new(
@@ -256,10 +263,10 @@ impl Decoder for ControlCodec {
         // Consume the complete packet
         let packet_data = src.split_to(total_packet_size);
         trace!("Control decoder: packet data = {:02x?}", packet_data);
-        
+
         // Skip the 2-byte length field
         let response_data = &packet_data[2..];
-        
+
         Response::parse(response_data).map(Some)
     }
 }
@@ -275,7 +282,11 @@ impl Encoder<Packet> for ControlCodec {
                 format!("Packet too large: {} bytes", encoded.len()),
             ));
         }
-        trace!("Control encoder: sending {} bytes: {:02x?}", encoded.len(), encoded);
+        trace!(
+            "Control encoder: sending {} bytes: {:02x?}",
+            encoded.len(),
+            encoded
+        );
         dst.extend_from_slice(&encoded);
         Ok(())
     }
@@ -290,7 +301,7 @@ mod tests {
         // Test GPIO write low
         let packet = Packet::gpio_write(0x42, 0, false);
         let encoded = packet.encode();
-        
+
         assert_eq!(encoded[0], 0x07); // length low byte
         assert_eq!(encoded[1], 0x00); // length high byte
         assert_eq!(encoded[2], 0x42); // id
@@ -298,12 +309,12 @@ mod tests {
         assert_eq!(encoded[4], 0x06); // GPIO page
         assert_eq!(encoded[5], 0x00); // command byte is pin 0
         assert_eq!(encoded[6], 0x00); // data: low
-        
+
         // Test GPIO write high
         let packet = Packet::gpio_write(0x42, 0, true);
         let encoded = packet.encode();
         assert_eq!(encoded[6], 0x01); // data: high
-        
+
         // Test GPIO pin 5
         let packet = Packet::gpio_write(0x42, 5, true);
         let encoded = packet.encode();

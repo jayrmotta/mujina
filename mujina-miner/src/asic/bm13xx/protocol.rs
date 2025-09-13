@@ -29,7 +29,7 @@ impl Frequency {
     pub const MAX_MHZ: f32 = 800.0;
     /// Base crystal frequency in MHz
     const CRYSTAL_MHZ: f32 = 25.0;
-    
+
     /// Create frequency from MHz value with validation
     #[allow(dead_code)]
     pub fn from_mhz(mhz: f32) -> Result<Self, ProtocolError> {
@@ -38,13 +38,13 @@ impl Frequency {
         }
         Ok(Self { mhz })
     }
-    
+
     /// Get frequency in MHz
     #[allow(dead_code)]
     pub fn mhz(&self) -> f32 {
         self.mhz
     }
-    
+
     /// Calculate optimal PLL configuration for this frequency
     pub fn calculate_pll(&self) -> PllConfig {
         let target_freq = self.mhz;
@@ -1406,7 +1406,7 @@ mod command_tests {
                 all: true,
                 chip_address: 0x00,
                 register: Register::Core {
-                    raw_value: 0x80008B00,  // Big-endian: produces bytes 80 00 8B 00
+                    raw_value: 0x80008B00, // Big-endian: produces bytes 80 00 8B 00
                 },
             },
             &[
@@ -1984,7 +1984,10 @@ impl BM13xxProtocol {
     /// 1. Set PLL parameters for desired frequency
     /// 2. Enable version rolling if supported
     /// 3. Configure other chip-specific settings
-    #[expect(dead_code, reason = "Will be used when we implement frequency configuration")]
+    #[expect(
+        dead_code,
+        reason = "Will be used when we implement frequency configuration"
+    )]
     pub fn single_chip_init(&self, frequency: Frequency) -> Vec<Command> {
         let mut commands = Vec::new();
 
