@@ -1,4 +1,10 @@
 //! Serial frame assembly for BM13xx protocol.
+//!
+//! TODO: Build unit tests for frame assembly using known serial captures
+//! - Test 88-byte work frame assembly with correct timeouts
+//! - Test 11-byte response frame assembly with proper boundaries
+//! - Test frame assembly edge cases (timeouts, incomplete frames, errors)
+//! - Use timing data from actual captures to validate assembly logic
 
 use crate::capture::{Channel, SerialEvent};
 use anyhow::Result;

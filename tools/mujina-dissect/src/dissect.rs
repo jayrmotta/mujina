@@ -1,4 +1,10 @@
 //! Protocol dissection engine.
+//!
+//! TODO: Build comprehensive unit tests based on known serial captures
+//! - Use captured frames from ~/mujina/captures/bitaxe-gamma-logic/esp-miner-boot.csv
+//! - Test CRC validation for both work frames (CRC16) and response frames (CRC5)
+//! - Test frame parsing for JobFull work frames and register responses
+//! - Add regression tests to prevent future parsing failures
 
 use crate::i2c::I2cOperation;
 use crate::serial::{Direction, SerialFrame};
