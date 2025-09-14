@@ -1,4 +1,4 @@
-pub(crate) mod bm13xx;
+pub mod bm13xx;
 
 use async_trait::async_trait;
 use std::error::Error;
