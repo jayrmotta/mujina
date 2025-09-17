@@ -251,6 +251,43 @@ pub mod protocol {
                 PmbusCommand::Phase => decode_phase(data),
                 PmbusCommand::Capability => decode_capability(data),
 
+                // Configuration registers
+                PmbusCommand::StackConfig => {
+                    if data.len() >= 2 {
+                        let config = u16::from_le_bytes([data[0], data[1]]);
+                        let desc = if config == 0x0000 {
+                            "standalone"
+                        } else {
+                            "stacked"
+                        };
+                        format!("{:02x?} ({})", data, desc)
+                    } else {
+                        format!("{:02x?}", data)
+                    }
+                }
+                PmbusCommand::SyncConfig => {
+                    if data.len() >= 1 {
+                        let config = data[0];
+                        let desc = match config {
+                            0x00 => "no sync",
+                            0xf0 => "master sync",
+                            _ => &format!("sync config 0x{:02x}", config),
+                        };
+                        format!("{:02x?} ({})", data, desc)
+                    } else {
+                        format!("{:02x?}", data)
+                    }
+                }
+                PmbusCommand::Interleave => {
+                    if data.len() >= 2 {
+                        let value = u16::from_le_bytes([data[0], data[1]]);
+                        let degrees = (value as f32) * 360.0 / 65536.0;
+                        format!("{:02x?} ({:.1}° phase offset)", data, degrees)
+                    } else {
+                        format!("{:02x?}", data)
+                    }
+                }
+
                 // Data-less write-only command
                 PmbusCommand::ClearFaults => decode_clear_faults_read(data),
 
