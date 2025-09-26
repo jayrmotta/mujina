@@ -277,12 +277,42 @@ pub fn group_transactions(transactions: &[I2cTransaction]) -> Vec<I2cOperation> 
     while i < transactions.len() {
         let t1 = &transactions[i];
 
-        // Check if this is a register write followed by read pattern
-        if !t1.is_read && t1.data.len() >= 1 && i + 1 < transactions.len() {
-            let t2 = &transactions[i + 1];
-            let time_gap = t2.start_time - t1.start_time;
+        // If this is a read transaction that already has register info from the I2C parser, use it directly
+        if t1.is_read && t1.register.is_some() {
+            operations.push(I2cOperation {
+                start_time: t1.start_time,
+                address: t1.address,
+                register: t1.register,
+                write_data: None,
+                read_data: Some(t1.data.clone()),
+                was_naked: !t1.all_acked,
+            });
+            i += 1;
+            continue;
+        }
 
-            if t2.is_read && t2.address == t1.address && time_gap <= MAX_TRANSACTION_GAP {
+        // Check if this is a register write that should be grouped with a subsequent read
+        if !t1.is_read && t1.data.len() >= 1 {
+            // Look for the next read transaction to the same address within a reasonable time window
+            let mut found_read = None;
+            for j in (i + 1)..(i + 10).min(transactions.len()) {
+                // Look ahead up to 10 transactions
+                let t2 = &transactions[j];
+                let time_gap = t2.start_time - t1.start_time;
+
+                // If time gap is too large, stop looking
+                if time_gap > MAX_TRANSACTION_GAP {
+                    break;
+                }
+
+                // If we find a read to the same address, this might be our match
+                if t2.is_read && t2.address == t1.address {
+                    found_read = Some((j, t2));
+                    break;
+                }
+            }
+
+            if let Some((read_idx, t2)) = found_read {
                 let command = t1.data[0];
 
                 // Don't group command-only writes like CLEAR_FAULTS (0x03) with subsequent reads
@@ -303,7 +333,9 @@ pub fn group_transactions(transactions: &[I2cTransaction]) -> Vec<I2cOperation> 
                         read_data: Some(t2.data.clone()),
                         was_naked: !t1.all_acked || !t2.all_acked,
                     });
-                    i += 2;
+
+                    // Skip all transactions up to and including the read we just processed
+                    i = read_idx + 1;
                     continue;
                 }
             }
@@ -319,11 +351,9 @@ pub fn group_transactions(transactions: &[I2cTransaction]) -> Vec<I2cOperation> 
                 None // Command-only (like CLEAR_FAULTS)
             };
             (Some(cmd), data)
-        } else if !t1.data.is_empty() {
-            // For reads, include all data
-            (Some(t1.data[0]), None)
         } else {
-            (None, None)
+            // For standalone reads, use the register from the I2C parser if available
+            (t1.register, None)
         };
 
         operations.push(I2cOperation {
