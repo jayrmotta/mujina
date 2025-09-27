@@ -6,6 +6,7 @@
 //! - Test frame parsing for JobFull work frames and register responses
 //! - Add regression tests to prevent future parsing failures
 
+use crate::capture::BaudRate;
 use crate::i2c::I2cOperation;
 use crate::serial::{DecodedFrame, Direction};
 use colored::Colorize;
@@ -19,6 +20,7 @@ use std::fmt;
 pub struct DissectedFrame {
     pub timestamp: f64,
     pub direction: Direction,
+    pub baud_rate: BaudRate,
     pub raw_data: Vec<u8>,
     pub content: FrameContent,
     pub crc_status: CrcStatus,
@@ -78,6 +80,7 @@ pub fn dissect_decoded_frame(frame: &DecodedFrame) -> DissectedFrame {
     DissectedFrame {
         timestamp: frame.timestamp(),
         direction: frame.direction(),
+        baud_rate: frame.baud_rate(),
         raw_data: match frame {
             DecodedFrame::Command { raw_bytes, .. } => raw_bytes.clone(),
             DecodedFrame::Response { raw_bytes, .. } => raw_bytes.clone(),

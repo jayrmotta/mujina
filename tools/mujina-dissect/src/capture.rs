@@ -66,7 +66,7 @@ pub enum Channel {
 }
 
 /// Baud rate for serial channels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BaudRate {
     Baud115200,
     Baud1M,

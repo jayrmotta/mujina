@@ -1,5 +1,6 @@
 //! Output formatting for dissected frames.
 
+use crate::capture::BaudRate;
 use crate::dissect::{CrcStatus, DissectedFrame, DissectedI2c, FrameContent, I2cDevice};
 use crate::serial::Direction;
 use colored::Colorize;
@@ -28,9 +29,14 @@ impl Default for OutputConfig {
 pub fn format_serial_frame(frame: &DissectedFrame, config: &OutputConfig) -> String {
     let timestamp = format_timestamp(frame.timestamp, config);
 
+    let baud_str = match frame.baud_rate {
+        BaudRate::Baud115200 => "115k",
+        BaudRate::Baud1M => "1M",
+    };
+
     let direction_str = match frame.direction {
-        Direction::HostToChip => "CI → ASIC",
-        Direction::ChipToHost => "RO ← ASIC",
+        Direction::HostToChip => format!("CI → ASIC {}", baud_str),
+        Direction::ChipToHost => format!("RO ← ASIC {}", baud_str),
     };
 
     let content_str = match &frame.content {

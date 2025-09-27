@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                     (Channel::RO, BaudRate::Baud1M) => &mut ro_1m_codec,
                 };
 
-                let frames = codec.feed_event(&serial_event);
+                let frames = codec.feed_event(&serial_event, serial_event.baud_rate);
                 for frame in frames {
                     decoded_frames.push((frame, serial_event.baud_rate));
                 }
@@ -153,12 +153,9 @@ fn main() -> Result<()> {
     }
     i2c_assembler.flush();
 
-    // Deduplicate frames, preferring successful decodes over errors
-    let deduplicated_frames = deduplicate_decoded_frames(decoded_frames);
-
-    // Collect serial frames
+    // Collect serial frames - each channel decodes independently, no deduplication
     if args.protocol == "all" || args.protocol == "bm13xx" {
-        for frame in deduplicated_frames {
+        for (frame, _baud_rate) in decoded_frames {
             let dissected = dissect_decoded_frame(&frame);
             all_events.push(OutputEvent::Serial(dissected));
         }
@@ -222,17 +219,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Deduplicate frames by preferring successful decodes over errors
-fn deduplicate_decoded_frames(mut candidates: Vec<(DecodedFrame, BaudRate)>) -> Vec<DecodedFrame> {
-    // Sort by timestamp
-    candidates.sort_by(|a, b| a.0.timestamp().partial_cmp(&b.0.timestamp()).unwrap());
-
-    // Simple approach: just collect all frames and let later processing handle any duplicates
-    // The key insight is that successful decodes should naturally suppress error frames
-    // since they'll be at different timestamps due to the decoder's byte-by-byte advancement
-    candidates.into_iter().map(|(frame, _baud)| frame).collect()
 }
 
 // Check if output is a terminal (for color support)
