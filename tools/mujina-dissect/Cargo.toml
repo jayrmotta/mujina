@@ -37,6 +37,10 @@ colored = "2.0"
 # Hex formatting
 hex = "0.4"
 
+# Protocol parsing
+bytes = "1.7"
+tokio-util = { version = "0.7", features = ["codec"] }
+
 # Logging (optional)
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
