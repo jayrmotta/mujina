@@ -12,10 +12,7 @@ use clap::Parser;
 use dissect::{dissect_decoded_frame, dissect_i2c_operation_with_context, I2cContexts};
 use i2c::{group_pmbus_transactions, group_transactions, I2cAssembler};
 use output::{OutputConfig, OutputEvent};
-use serial::{
-    CommandStreamingParser, DecodedFrame, Direction, ParsedItem, ResponseStreamingParser,
-    StreamingParser, TimestampedCodec,
-};
+use serial::{CommandStreamingParser, DecodedFrame, ParsedItem, ResponseStreamingParser};
 use std::path::PathBuf;
 
 /// Protocol dissector for Bitcoin mining hardware captures
@@ -90,17 +87,11 @@ fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    // Setup codecs - one for each baud rate per channel
-    let mut ci_115k_codec = TimestampedCodec::new(Direction::HostToChip);
-    let mut ci_1m_codec = TimestampedCodec::new(Direction::HostToChip);
-    let mut ro_115k_codec = TimestampedCodec::new(Direction::ChipToHost);
-    let mut ro_1m_codec = TimestampedCodec::new(Direction::ChipToHost);
-
-    // Setup new streaming parsers for testing
-    let mut ci_115k_streaming = CommandStreamingParser::new();
-    let mut ci_1m_streaming = CommandStreamingParser::new();
-    let mut ro_115k_streaming = ResponseStreamingParser::new();
-    let mut ro_1m_streaming = ResponseStreamingParser::new();
+    // Setup streaming parsers - one for each baud rate per channel
+    let mut ci_115k_parser = CommandStreamingParser::new();
+    let mut ci_1m_parser = CommandStreamingParser::new();
+    let mut ro_115k_parser = ResponseStreamingParser::new();
+    let mut ro_1m_parser = ResponseStreamingParser::new();
 
     let mut i2c_assembler = I2cAssembler::new();
 
@@ -122,29 +113,16 @@ fn main() -> Result<()> {
                     }
                 }
 
-                // Process with appropriate codec based on channel and baud rate
-                let codec = match (serial_event.channel, serial_event.baud_rate) {
-                    (Channel::CI, BaudRate::Baud115200) => &mut ci_115k_codec,
-                    (Channel::CI, BaudRate::Baud1M) => &mut ci_1m_codec,
-                    (Channel::RO, BaudRate::Baud115200) => &mut ro_115k_codec,
-                    (Channel::RO, BaudRate::Baud1M) => &mut ro_1m_codec,
-                };
-
-                let frames = codec.feed_event(&serial_event, serial_event.baud_rate);
-                for frame in frames {
-                    decoded_frames.push((frame, serial_event.baud_rate));
-                }
-
-                // Test new streaming parser for CI 1M only (where JobFull commands are)
-                if serial_event.channel == Channel::CI && serial_event.baud_rate == BaudRate::Baud1M
-                {
-                    for parsed_item in ci_1m_streaming.process_event(&serial_event) {
-                        match parsed_item {
-                            ParsedItem::ValidFrame {
+                // Process with appropriate streaming parser based on channel and baud rate
+                match (serial_event.channel, serial_event.baud_rate) {
+                    (Channel::CI, BaudRate::Baud115200) => {
+                        for parsed_item in ci_115k_parser.process_event(&serial_event) {
+                            if let ParsedItem::ValidFrame {
                                 command,
                                 raw_bytes,
                                 timestamps,
-                            } => {
+                            } = parsed_item
+                            {
                                 let frame = DecodedFrame::Command {
                                     timestamp: timestamps
                                         .last()
@@ -157,10 +135,72 @@ fn main() -> Result<()> {
                                 };
                                 decoded_frames.push((frame, serial_event.baud_rate));
                             }
-                            ParsedItem::InvalidBytes { .. } => {
-                                // Silently ignore invalid bytes for now
+                        }
+                    }
+                    (Channel::CI, BaudRate::Baud1M) => {
+                        for parsed_item in ci_1m_parser.process_event(&serial_event) {
+                            if let ParsedItem::ValidFrame {
+                                command,
+                                raw_bytes,
+                                timestamps,
+                            } = parsed_item
+                            {
+                                let frame = DecodedFrame::Command {
+                                    timestamp: timestamps
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(serial_event.timestamp),
+                                    command,
+                                    raw_bytes,
+                                    has_errors: false,
+                                    baud_rate: serial_event.baud_rate,
+                                };
+                                decoded_frames.push((frame, serial_event.baud_rate));
                             }
-                            _ => {} // Handle other cases if needed
+                        }
+                    }
+                    (Channel::RO, BaudRate::Baud115200) => {
+                        for parsed_item in ro_115k_parser.process_event(&serial_event) {
+                            if let ParsedItem::ValidResponse {
+                                response,
+                                raw_bytes,
+                                timestamps,
+                            } = parsed_item
+                            {
+                                let frame = DecodedFrame::Response {
+                                    timestamp: timestamps
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(serial_event.timestamp),
+                                    response,
+                                    raw_bytes,
+                                    has_errors: false,
+                                    baud_rate: serial_event.baud_rate,
+                                };
+                                decoded_frames.push((frame, serial_event.baud_rate));
+                            }
+                        }
+                    }
+                    (Channel::RO, BaudRate::Baud1M) => {
+                        for parsed_item in ro_1m_parser.process_event(&serial_event) {
+                            if let ParsedItem::ValidResponse {
+                                response,
+                                raw_bytes,
+                                timestamps,
+                            } = parsed_item
+                            {
+                                let frame = DecodedFrame::Response {
+                                    timestamp: timestamps
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(serial_event.timestamp),
+                                    response,
+                                    raw_bytes,
+                                    has_errors: false,
+                                    baud_rate: serial_event.baud_rate,
+                                };
+                                decoded_frames.push((frame, serial_event.baud_rate));
+                            }
                         }
                     }
                 }
@@ -178,19 +218,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Flush any pending frames from all codecs
-    for frame in ci_115k_codec.flush() {
-        decoded_frames.push((frame, BaudRate::Baud115200));
-    }
-    for frame in ci_1m_codec.flush() {
-        decoded_frames.push((frame, BaudRate::Baud1M));
-    }
-    for frame in ro_115k_codec.flush() {
-        decoded_frames.push((frame, BaudRate::Baud115200));
-    }
-    for frame in ro_1m_codec.flush() {
-        decoded_frames.push((frame, BaudRate::Baud1M));
-    }
+    // Streaming parsers don't need explicit flushing - they process incrementally
     i2c_assembler.flush();
 
     // Collect serial frames - each channel decodes independently, no deduplication
