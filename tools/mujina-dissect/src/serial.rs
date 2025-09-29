@@ -170,11 +170,18 @@ impl TimestampedCodec {
                             // Decoder advanced by 1 byte (standard behavior) - silently continue
                             let consumed_bytes = buffer_before.len() - self.buffer.len();
                             if consumed_bytes > 0 {
-                                // Just consume the timestamps/errors and discard silently
+                                // CRITICAL: Must drain timestamps/errors to keep vectors synchronized with buffer
                                 self.byte_timestamps.drain(..consumed_bytes);
                                 self.byte_errors.drain(..consumed_bytes);
                             }
                         }
+                    }
+
+                    // Ensure tracking vectors stay synchronized with buffer length
+                    let buffer_len = self.buffer.len();
+                    if self.byte_errors.len() != buffer_len {
+                        self.byte_errors.truncate(buffer_len);
+                        self.byte_timestamps.truncate(buffer_len);
                     }
                 }
                 Direction::ChipToHost => {
@@ -230,6 +237,13 @@ impl TimestampedCodec {
                                 self.byte_errors.drain(..consumed_bytes);
                             }
                         }
+                    }
+
+                    // Ensure tracking vectors stay synchronized with buffer length
+                    let buffer_len = self.buffer.len();
+                    if self.byte_errors.len() != buffer_len {
+                        self.byte_errors.truncate(buffer_len);
+                        self.byte_timestamps.truncate(buffer_len);
                     }
                 }
             }
@@ -387,7 +401,6 @@ impl CommandDecoder {
         };
 
         if !crc_valid {
-            trace!("CRC validation failed for frame: {:02x?}", data);
             return Err(ProtocolError::InvalidFrame);
         }
 
