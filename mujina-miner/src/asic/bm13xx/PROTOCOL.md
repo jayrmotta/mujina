@@ -109,17 +109,53 @@ Common Type/Flags values:
 - `0x21` = TYPE=0, BROADCAST=0, CMD=1 (send work/job)
 
 ### Set Chip Address (CMD=0)
-Assigns an address to a chip in the serial chain.
+Assigns an address to a chip in the serial chain via daisy-chain forwarding.
 
 **Request Format:**
 ```
-| 0x55 0xAA | Type/Flags | Length | Chip_Addr | Reg_Addr | CRC5 |
+| 0x55 0xAA | Type/Flags | Length | New_Addr | Reserved | CRC5 |
 ```
 - Length: Always `0x05` (5 bytes excluding preamble)
-- Type/Flags: `0x40` (single chip addressing)
-- Chip_Addr: The address to assign (typically increments by 2: 0x00, 0x02, 0x04...)
-- Reg_Addr: Always `0x00`
+- Type/Flags: `0x40` (NOT broadcast - uses daisy-chain forwarding)
+- New_Addr: The address to assign (typically increments by 2: 0x00, 0x02, 0x04...)
+- Reserved: Always `0x00` (no semantic meaning, possibly padding)
 - Example: `55 AA 40 05 04 00 15` (assign address 0x04)
+
+**How Daisy-Chain Addressing Works:**
+
+After sending the ChainInactive command (CMD=3), all chips enter a special
+addressing mode where they forward commands they don't respond to downstream:
+
+1. Host sends ChainInactive (broadcast) - all chips enter addressing mode
+2. Host sends SetChipAddress with new address (NOT broadcast)
+3. First unaddressed chip in chain intercepts command and adopts that address
+4. Now-addressed chip passes subsequent SetChipAddress commands downstream
+5. Next unaddressed chip receives the command and adopts its address
+6. Process repeats until all chips are addressed
+
+This mechanism allows the host to sequentially address chips without knowing the
+chain length beforehand. The command is NOT broadcast (BROADCAST bit = 0) because
+it should only be processed by one chip at a time, but it doesn't target an
+existing chip address - instead, it's intercepted by the first unaddressed chip
+through forwarding.
+
+### Chain Inactive (CMD=3)
+Puts all chips into addressing mode, enabling the daisy-chain forwarding
+mechanism used by SetChipAddress.
+
+**Request Format:**
+```
+| 0x55 0xAA | Type/Flags | Length | Reserved | Reserved | CRC5 |
+```
+- Length: Always `0x05` (5 bytes excluding preamble)
+- Type/Flags: `0x53` (broadcast to all chips)
+- Both data bytes: Always `0x00 0x00`
+- Example: `55 AA 53 05 00 00 03`
+
+This command is broadcast to all chips before address assignment. In addressing
+mode, chips that don't recognize a command (because it's not for them) will
+forward it to the next chip in the chain. This enables the sequential addressing
+mechanism described in SetChipAddress above.
 
 ### Read Register (CMD=2)
 Reads a 4-byte register from the ASIC.
@@ -479,9 +515,12 @@ Undocumented miscellaneous settings register:
    - Send chain inactive command (0x53)
 
 3. **Address Assignment**
-   - Assign addresses incrementing by 2 (0x00, 0x02, 0x04...)
-   - Use command 0x40 for each address
-   - Typically assign 128 addresses regardless of actual chip count
+   - Chain inactive command (0x53) puts chips in addressing mode
+   - Send SetChipAddress commands (0x40) with addresses incrementing by 2
+   - Each command assigns address to first unaddressed chip via daisy-chain
+     forwarding (see SetChipAddress command documentation for details)
+   - Typically send 128 address commands regardless of actual chip count
+   - Example sequence: 0x00, 0x02, 0x04, 0x06... up to 0xFE
 
 4. **Domain Configuration** (BM1370 chains)
    - Configure IO driver strength on domain-end chips
