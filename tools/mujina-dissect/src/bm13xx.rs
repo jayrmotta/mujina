@@ -384,7 +384,7 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
             let register_value = [data[6], data[7], data[8], data[9]];
             let register = Register::decode(register_address, &register_value);
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0,
                 register,
             }
@@ -395,7 +395,7 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
             let register_value = [data[6], data[7], data[8], data[9]];
             let register = Register::decode(register_address, &register_value);
             Command::WriteRegister {
-                all: false,
+                broadcast: false,
                 chip_address: data[4],
                 register,
             }
@@ -404,7 +404,7 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
             let register_address =
                 RegisterAddress::from_repr(data[5]).ok_or(ProtocolError::InvalidFrame)?;
             Command::ReadRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0,
                 register_address,
             }
@@ -413,7 +413,7 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
             let register_address =
                 RegisterAddress::from_repr(data[5]).ok_or(ProtocolError::InvalidFrame)?;
             Command::ReadRegister {
-                all: false,
+                broadcast: false,
                 chip_address: data[4],
                 register_address,
             }

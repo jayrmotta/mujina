@@ -95,6 +95,10 @@ Bits 3-0: CMD value
 Bits 7,5: Reserved/undefined in observed examples
 ```
 
+**Implementation Note**: In our code, we use the field name `broadcast` for this
+bit. Reference implementations may use different names (such as `all`), but they
+all refer to the same protocol bit.
+
 Common Type/Flags values:
 - `0x40` = TYPE=1, BROADCAST=0, CMD=0 (set chip address)
 - `0x41` = TYPE=1, BROADCAST=0, CMD=1 (write register to specific chip)

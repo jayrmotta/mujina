@@ -814,7 +814,7 @@ impl Board for BitaxeBoard {
         for i in 1..=3 {
             tracing::trace!("Version mask send {}/3", i);
             let version_cmd = Command::WriteRegister {
-                all: true, // Broadcast to all chips
+                broadcast: true, // Broadcast to all chips
                 chip_address: 0x00,
                 register: bm13xx::protocol::Register::VersionMask(
                     bm13xx::protocol::VersionMask::full_rolling(),
@@ -851,7 +851,7 @@ impl Board for BitaxeBoard {
         // Send version mask again
         tracing::debug!("Sending version mask again after discovery");
         let version_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::VersionMask(
                 bm13xx::protocol::VersionMask::full_rolling(),
@@ -861,7 +861,7 @@ impl Board for BitaxeBoard {
 
         // InitControl register = 0x0700
         let init_control_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::InitControl {
                 raw_value: 0x00000700,
@@ -871,7 +871,7 @@ impl Board for BitaxeBoard {
 
         // MiscControl register = 0xC100F0
         let misc_control_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscControl {
                 raw_value: 0x00C100F0,
@@ -892,7 +892,7 @@ impl Board for BitaxeBoard {
 
         // CoreRegister = 0x8B0080 (sent as big-endian: 0x80 0x00 0x8B 0x00)
         let core_reg_cmd1 = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_8B00, // Big-endian encoding
@@ -902,7 +902,7 @@ impl Board for BitaxeBoard {
 
         // CoreRegister = 0x0C8080 (sent as big-endian: 0x80 0x00 0x80 0x0C)
         let core_reg_cmd2 = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_800C, // Big-endian encoding
@@ -914,7 +914,7 @@ impl Board for BitaxeBoard {
         // Register 0x14: ticket mask (difficulty control)
         let difficulty_mask = bm13xx::protocol::DifficultyMask::from_difficulty(255); // Start with difficulty 255
         let ticket_mask_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::TicketMask(difficulty_mask),
         };
@@ -922,7 +922,7 @@ impl Board for BitaxeBoard {
 
         // IoDriverStrength = 0x11110100
         let io_strength_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::IoDriverStrength(
                 bm13xx::protocol::IoDriverStrength::normal(),
@@ -935,7 +935,7 @@ impl Board for BitaxeBoard {
 
         // InitControl = 0xF0010700 (chip-specific, not broadcast)
         let init_control_specific = Command::WriteRegister {
-            all: false, // Not broadcast - specific to chip 0x00
+            broadcast: false, // Not broadcast - specific to chip 0x00
             chip_address: 0x00,
             register: bm13xx::protocol::Register::InitControl {
                 raw_value: 0xF0010700,
@@ -945,7 +945,7 @@ impl Board for BitaxeBoard {
 
         // MiscControl = 0xC100F0 (chip-specific)
         let misc_control_specific = Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscControl {
                 raw_value: 0x00C100F0,
@@ -955,7 +955,7 @@ impl Board for BitaxeBoard {
 
         // CoreRegister = 0x8B0080 (chip-specific)
         let core_reg_specific1 = Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_8B00, // Big-endian
@@ -965,7 +965,7 @@ impl Board for BitaxeBoard {
 
         // CoreRegister = 0x0C8080 (chip-specific)
         let core_reg_specific2 = Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_800C, // Big-endian
@@ -975,7 +975,7 @@ impl Board for BitaxeBoard {
 
         // CoreRegister = 0xAA820080 (chip-specific)
         let core_reg_specific3 = Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_82AA, // Big-endian encoding
@@ -988,7 +988,7 @@ impl Board for BitaxeBoard {
 
         // MiscSettings = 0x80440000 (note: different from current 0x00004480)
         let misc_b9_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscSettings {
                 raw_value: 0x80440000, // Little-endian: bytes 00 00 44 80
@@ -998,7 +998,7 @@ impl Board for BitaxeBoard {
 
         // Register 0x54: Analog mux control (temperature diode)
         let analog_mux_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::AnalogMux {
                 raw_value: 0x02000000, // Little-endian: bytes 00 00 00 02
@@ -1008,7 +1008,7 @@ impl Board for BitaxeBoard {
 
         // Send misc B9 again (esp-miner does this)
         let misc_b9_cmd2 = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::MiscSettings {
                 raw_value: 0x80440000, // Little-endian: bytes 00 00 44 80
@@ -1018,7 +1018,7 @@ impl Board for BitaxeBoard {
 
         // Additional CoreRegister = 0xEE8D0080 (after misc settings)
         let core_reg_final = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::Core {
                 raw_value: 0x8000_8DEE, // Big-endian encoding
@@ -1039,7 +1039,7 @@ impl Board for BitaxeBoard {
 
         for (i, pll_config) in frequency_steps.iter().enumerate() {
             let pll_cmd = Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: bm13xx::protocol::Register::PllDivider(*pll_config),
             };
@@ -1061,7 +1061,7 @@ impl Board for BitaxeBoard {
         // NonceRange = 0xB51E0000 (correct value from reference)
         let nonce_range_value = 0x0000B51E; // Raw value from captures
         let nonce_range_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::NonceRange(
                 // Create NonceRangeConfig with the exact value
@@ -1077,7 +1077,7 @@ impl Board for BitaxeBoard {
             Self::TARGET_BAUD_RATE
         );
         let baud_cmd = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::UartBaud(Self::CHIP_BAUD_REGISTER),
         };
@@ -1109,7 +1109,7 @@ impl Board for BitaxeBoard {
         // After all configuration, send version mask once more
         tracing::debug!("Sending final version mask configuration");
         let version_cmd_final = Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: bm13xx::protocol::Register::VersionMask(
                 bm13xx::protocol::VersionMask::full_rolling(),

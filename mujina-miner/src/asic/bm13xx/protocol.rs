@@ -365,21 +365,21 @@ impl VersionMask {
     /// Full 16-bit mask for version rolling
     const FULL_MASK: u16 = 0xffff;
     /// Fixed control pattern used by all implementations to enable version rolling
-    const CONTROL_ENABLE: u16 = 0x0090;
+    const ENABLE_ROLLING: u16 = 0x0090;
 
     /// Create version mask with all lower 16 bits enabled
     pub fn full_rolling() -> Self {
         Self {
             mask: Self::FULL_MASK,
-            control: Self::CONTROL_ENABLE,
+            control: Self::ENABLE_ROLLING,
         }
     }
 }
 
 impl fmt::Debug for VersionMask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let control_str = if self.control == Self::CONTROL_ENABLE {
-            "CONTROL_ENABLE".to_string()
+        let control_str = if self.control == Self::ENABLE_ROLLING {
+            "ENABLE_ROLLING".to_string()
         } else {
             format!("{:#06x}", self.control)
         };
@@ -639,13 +639,13 @@ pub enum Command {
     ChainInactive,
     /// Read a register from chip(s)
     ReadRegister {
-        all: bool,
+        broadcast: bool,
         chip_address: u8,
         register_address: RegisterAddress,
     },
     /// Write a register to chip(s)
     WriteRegister {
-        all: bool,
+        broadcast: bool,
         chip_address: u8,
         register: Register,
     },
@@ -691,11 +691,11 @@ pub struct JobMidstateFormat {
 }
 
 impl Command {
-    fn build_flags(typ: CommandFlagsType, all: bool, cmd: CommandFlagsCmd) -> u8 {
+    fn build_flags(typ: CommandFlagsType, broadcast: bool, cmd: CommandFlagsCmd) -> u8 {
         let mut flags = 0u8;
         let field = flags.view_bits_mut::<Lsb0>();
         field[5..7].store(typ as u8);
-        field[4..5].store(all as u8);
+        field[4..5].store(broadcast as u8);
         field[0..4].store(cmd as u8);
         flags
     }
@@ -741,13 +741,13 @@ impl Command {
                 dst.put_u8(0x00); // Register address
             }
             Command::ReadRegister {
-                all,
+                broadcast,
                 chip_address,
                 register_address,
             } => {
                 dst.put_u8(Self::build_flags(
                     CommandFlagsType::Command,
-                    *all,
+                    *broadcast,
                     CommandFlagsCmd::ReadRegister,
                 ));
 
@@ -764,13 +764,13 @@ impl Command {
                 dst.put_u8(*register_address as u8);
             }
             Command::WriteRegister {
-                all,
+                broadcast,
                 chip_address,
                 register,
             } => {
                 dst.put_u8(Self::build_flags(
                     CommandFlagsType::Command,
-                    *all,
+                    *broadcast,
                     CommandFlagsCmd::WriteRegisterOrJob,
                 ));
 
@@ -1094,7 +1094,7 @@ mod init_tests {
         assert!(matches!(
             &commands[0],
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::VersionMask(_),
             }
@@ -1181,7 +1181,7 @@ mod init_tests {
                 cmd,
                 Command::WriteRegister {
                     register: Register::PllDivider(_),
-                    all: true,
+                    broadcast: true,
                     ..
                 }
             ));
@@ -1269,7 +1269,7 @@ mod init_tests {
         assert_eq!(commands.len(), 1);
         if let Command::WriteRegister {
             register: Register::NonceRange(config),
-            all: true,
+            broadcast: true,
             ..
         } = &commands[0]
         {
@@ -1372,7 +1372,7 @@ mod command_tests {
     fn read_register() {
         assert_frame_eq(
             Command::ReadRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0,
                 register_address: RegisterAddress::ChipId,
             },
@@ -1384,7 +1384,7 @@ mod command_tests {
     fn write_register_chip_address() {
         assert_frame_eq(
             Command::WriteRegister {
-                all: false,
+                broadcast: false,
                 chip_address: 0x01,
                 register: Register::ChipId {
                     chip_type: ChipType::BM1370,
@@ -1404,7 +1404,7 @@ mod command_tests {
         // From S21 Pro capture: TX: 55 AA 51 09 00 A4 90 00 FF FF 1C
         assert_frame_eq(
             Command::WriteRegister {
-                all: true, // 0x51 = broadcast
+                broadcast: true, // 0x51 = broadcast
                 chip_address: 0x00,
                 register: Register::VersionMask(VersionMask::full_rolling()),
             },
@@ -1420,7 +1420,7 @@ mod command_tests {
         // Value 0x00 07 00 00 in little-endian = 0x00000700
         assert_frame_eq(
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::InitControl {
                     raw_value: 0x00000700,
@@ -1437,7 +1437,7 @@ mod command_tests {
         // From Bitaxe capture: TX: 55 AA 51 09 00 18 F0 00 C1 00 04
         assert_frame_eq(
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::MiscControl {
                     raw_value: 0x00C100F0,
@@ -1473,7 +1473,7 @@ mod command_tests {
         // Core register uses big-endian encoding
         assert_frame_eq(
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::Core {
                     raw_value: 0x80008B00, // Big-endian: produces bytes 80 00 8B 00
@@ -1490,7 +1490,7 @@ mod command_tests {
         // From S21 Pro capture: TX: 55 AA 51 09 00 14 00 00 00 FF 08
         assert_frame_eq(
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::TicketMask(DifficultyMask::from_difficulty(256)),
             },
@@ -1505,7 +1505,7 @@ mod command_tests {
         // From S21 Pro capture: TX: 55 AA 51 09 00 10 00 00 1E B5 0F
         assert_frame_eq(
             Command::WriteRegister {
-                all: true,
+                broadcast: true,
                 chip_address: 0x00,
                 register: Register::NonceRange(NonceRangeConfig::multi_chip(65)),
             },
@@ -2008,7 +2008,7 @@ impl BM13xxProtocol {
     /// Helper to create a broadcast write command
     fn broadcast_write(&self, register: Register) -> Command {
         Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register,
         }
@@ -2018,7 +2018,7 @@ impl BM13xxProtocol {
     #[cfg_attr(not(test), allow(dead_code))]
     fn write_to(&self, chip_address: u8, register: Register) -> Command {
         Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address,
             register,
         }
@@ -2300,7 +2300,7 @@ impl BM13xxProtocol {
     /// Create a command to read a register.
     pub fn read_register(&self, chip_address: u8, register: RegisterAddress) -> Command {
         Command::ReadRegister {
-            all: false,
+            broadcast: false,
             chip_address,
             register_address: register,
         }
@@ -2309,7 +2309,7 @@ impl BM13xxProtocol {
     /// Set UART baud rate on all chips
     pub fn set_baudrate(&self, baudrate: BaudRate) -> Command {
         Command::WriteRegister {
-            all: true,
+            broadcast: true,
             chip_address: 0x00,
             register: Register::UartBaud(baudrate),
         }
@@ -2361,7 +2361,7 @@ impl BM13xxProtocol {
         };
 
         Ok(Command::WriteRegister {
-            all: false,
+            broadcast: false,
             chip_address,
             register: register_value,
         })
@@ -2370,7 +2370,7 @@ impl BM13xxProtocol {
     /// Create a broadcast command to discover all chips.
     pub fn discover_chips() -> Command {
         Command::ReadRegister {
-            all: true, // Broadcast
+            broadcast: true,
             chip_address: 0,
             register_address: RegisterAddress::ChipId,
         }
