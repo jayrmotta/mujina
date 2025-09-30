@@ -633,9 +633,9 @@ enum CommandFlagsCmd {
 
 #[derive(Debug)]
 pub enum Command {
-    /// Set address for a chip in the chain
+    /// Assign an address to the first unaddressed chip via daisy-chain forwarding
     SetChipAddress { chip_address: u8 },
-    /// Prepare chain for address assignment
+    /// Put all chips into addressing mode (enables daisy-chain forwarding)
     ChainInactive,
     /// Read a register from chip(s)
     ReadRegister {
@@ -719,7 +719,7 @@ impl Command {
 
                 dst.put_u8(TOTAL_LEN);
                 dst.put_u8(*chip_address);
-                dst.put_u8(0x00); // Register address is always 0x00
+                dst.put_u8(0x00); // Reserved byte (always 0x00)
             }
             Command::ChainInactive => {
                 dst.put_u8(Self::build_flags(
@@ -737,8 +737,8 @@ impl Command {
                 const TOTAL_LEN: u8 = FLAGS_LEN + CHIP_ADDR_LEN + REG_ADDR_LEN + CRC_LEN + 1; // +1 for length field
 
                 dst.put_u8(TOTAL_LEN);
-                dst.put_u8(0x00); // Chip address
-                dst.put_u8(0x00); // Register address
+                dst.put_u8(0x00); // Reserved byte
+                dst.put_u8(0x00); // Reserved byte
             }
             Command::ReadRegister {
                 broadcast,
