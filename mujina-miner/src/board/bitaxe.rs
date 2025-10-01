@@ -10,7 +10,11 @@ use tokio::{
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::asic::bm13xx::{self, protocol::Command, BM13xxProtocol};
+use crate::asic::bm13xx::{
+    self,
+    protocol::{Command, Hashrate, ReportingInterval, ReportingRate, TicketMask},
+    BM13xxProtocol,
+};
 use crate::asic::{ChipInfo, MiningJob};
 use crate::board::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
 use crate::hw_trait::gpio::{Gpio, GpioPin, PinValue};
@@ -910,13 +914,17 @@ impl Board for BitaxeBoard {
         };
         self.send_config_command(core_reg_cmd2).await?;
 
-        // Set ticket mask for difficulty (before IoDriverStrength)
-        // Register 0x14: ticket mask (difficulty control)
-        let difficulty_mask = bm13xx::protocol::DifficultyMask::from_difficulty(255); // Start with difficulty 255
+        // Set ticket mask for nonce reporting
+        // Bitaxe Gamma: ~500 GH/s, want ~1 nonce/sec
+        let reporting_interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(500.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        let ticket_mask = TicketMask::new(reporting_interval);
         let ticket_mask_cmd = Command::WriteRegister {
             broadcast: true,
             chip_address: 0x00,
-            register: bm13xx::protocol::Register::TicketMask(difficulty_mask),
+            register: bm13xx::protocol::Register::TicketMask(ticket_mask),
         };
         self.send_config_command(ticket_mask_cmd).await?;
 

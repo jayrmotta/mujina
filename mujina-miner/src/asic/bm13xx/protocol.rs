@@ -36,7 +36,7 @@ impl Frequency {
     /// Minimum supported frequency in MHz
     #[allow(dead_code)]
     pub const MIN_MHZ: f32 = 50.0;
-    /// Maximum supported frequency in MHz  
+    /// Maximum supported frequency in MHz
     #[allow(dead_code)]
     pub const MAX_MHZ: f32 = 800.0;
     /// Base crystal frequency in MHz
@@ -256,30 +256,189 @@ impl From<NonceRangeConfig> for [u8; 4] {
     }
 }
 
-/// Difficulty mask for share submission
+/// ASIC hashrate in hashes per second
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DifficultyMask {
-    /// Each byte is bit-reversed
-    bytes: [u8; 4],
+pub struct Hashrate {
+    hps: f64, // Hashrate in hashes per second
 }
 
-impl DifficultyMask {
-    /// Create from difficulty value
-    pub fn from_difficulty(difficulty: u32) -> Self {
-        // For now, simple mapping
-        // Difficulty 256 means the first byte (most significant) should be 0xff
-        let bytes = match difficulty {
-            256 => [0x00, 0x00, 0x00, 0xff], // As seen in captures
-            _ => [0xff, 0xff, 0xff, 0x00],
-        };
-        Self { bytes }
+impl Hashrate {
+    /// Create hashrate from gibihashes per second (GiH/s = 2^30 H/s)
+    ///
+    /// # Arguments
+    /// * `n` - Number of gibihashes/sec (any value accepted)
+    ///
+    /// # Example
+    /// ```
+    /// use mujina_miner::asic::bm13xx::protocol::Hashrate;
+    /// let hr = Hashrate::gibihashes_per_sec(500.0); // 500 GiH/s
+    /// ```
+    pub fn gibihashes_per_sec(n: f64) -> Self {
+        Self {
+            hps: n * 2f64.powi(30),
+        }
+    }
+
+    /// Create hashrate from tebihashes per second (TiH/s = 2^40 H/s)
+    ///
+    /// # Arguments
+    /// * `n` - Number of tebihashes/sec (any value accepted)
+    ///
+    /// # Example
+    /// ```
+    /// use mujina_miner::asic::bm13xx::protocol::Hashrate;
+    /// let hr = Hashrate::tebihashes_per_sec(1.0); // 1 TiH/s
+    /// ```
+    pub fn tebihashes_per_sec(n: f64) -> Self {
+        Self {
+            hps: n * 2f64.powi(40),
+        }
+    }
+
+    /// Get log2 of the hashrate (for internal calculations)
+    pub fn log2(&self) -> f64 {
+        self.hps.log2()
     }
 }
 
-impl From<DifficultyMask> for [u8; 4] {
-    fn from(mask: DifficultyMask) -> Self {
-        mask.bytes // Already in the correct format
+/// Desired nonce reporting rate
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReportingRate {
+    nonces_per_sec: f64,
+}
+
+impl ReportingRate {
+    /// Create reporting rate from nonces per second
+    ///
+    /// # Example
+    /// ```
+    /// use mujina_miner::asic::bm13xx::protocol::ReportingRate;
+    /// let rate = ReportingRate::nonces_per_sec(1.0); // 1 nonce/sec
+    /// ```
+    pub const fn nonces_per_sec(n: f64) -> Self {
+        Self { nonces_per_sec: n }
     }
+
+    pub const fn nonces_per_sec_value(&self) -> f64 {
+        self.nonces_per_sec
+    }
+}
+
+/// Reporting interval: report 1 nonce per 2^exponent hashes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportingInterval {
+    exponent: u8, // N in "report 1 nonce per 2^N hashes"
+}
+
+impl ReportingInterval {
+    const fn from_exponent(exponent: u8) -> Self {
+        assert!(exponent >= 32 && exponent <= 56, "Exponent must be 32-56");
+        Self { exponent }
+    }
+
+    /// Calculate reporting interval from hashrate and desired reporting rate
+    ///
+    /// The result is rounded to the nearest power-of-2 interval to match
+    /// hardware constraints.
+    ///
+    /// # Example
+    /// ```
+    /// use mujina_miner::asic::bm13xx::protocol::{Hashrate, ReportingRate, ReportingInterval};
+    /// let interval = ReportingInterval::from_rate(
+    ///     Hashrate::gibihashes_per_sec(500.0),
+    ///     ReportingRate::nonces_per_sec(1.0)
+    /// );
+    /// ```
+    pub fn from_rate(hashrate: Hashrate, rate: ReportingRate) -> Self {
+        let total_bits = (hashrate.log2() - rate.nonces_per_sec_value().log2()).ceil() as u8;
+        Self::from_exponent(total_bits.max(32).min(56))
+    }
+
+    pub const fn exponent(&self) -> u8 {
+        self.exponent
+    }
+}
+
+impl std::fmt::Display for ReportingInterval {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "2^{}", self.exponent)
+    }
+}
+
+/// Ticket mask controlling ASIC nonce reporting
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TicketMask {
+    // Number of additional zero bits required in the bit-reversed hash,
+    // beyond the base 32 bits. The chip always requires bits 0-31 of the
+    // bit-reversed hash to be zero. This parameter adds bits 32..(32+zero_bits)
+    // that must also be zero.
+    zero_bits: u8,
+}
+
+impl TicketMask {
+    /// Create ticket mask from reporting interval
+    ///
+    /// # Example
+    /// ```
+    /// use mujina_miner::asic::bm13xx::protocol::{Hashrate, ReportingRate, ReportingInterval, TicketMask};
+    /// let interval = ReportingInterval::from_rate(
+    ///     Hashrate::gibihashes_per_sec(512.0),
+    ///     ReportingRate::nonces_per_sec(1.0)
+    /// );
+    /// let mask = TicketMask::new(interval);
+    /// ```
+    pub const fn new(interval: ReportingInterval) -> Self {
+        Self {
+            zero_bits: interval.exponent.saturating_sub(32),
+        }
+    }
+
+    /// Encode ticket mask to wire format bytes
+    pub fn to_wire_bytes(&self) -> [u8; 4] {
+        if self.zero_bits == 0 {
+            return [0, 0, 0, 0];
+        }
+
+        // Create mask value: 2^zero_bits - 1
+        let mask_value = (1u32 << self.zero_bits) - 1;
+
+        // Encode to wire format with bit-reversal and byte-reversal
+        let mut bytes = [0u8; 4];
+        for i in 0..4 {
+            let byte = ((mask_value >> (8 * i)) & 0xFF) as u8;
+            bytes[3 - i] = reverse_bits(byte);
+        }
+
+        bytes
+    }
+}
+
+impl From<TicketMask> for [u8; 4] {
+    fn from(mask: TicketMask) -> Self {
+        mask.to_wire_bytes()
+    }
+}
+
+/// Helper function to reverse bits in a byte
+fn reverse_bits(byte: u8) -> u8 {
+    let mut result = 0u8;
+    let mut b = byte;
+    for _ in 0..8 {
+        result = (result << 1) | (b & 1);
+        b >>= 1;
+    }
+    result
+}
+
+/// Helper function to decode ticket mask bytes back to mask value
+fn decode_ticket_mask_bytes(bytes: &[u8; 4]) -> u32 {
+    // Reverse the encoding process: undo byte reversal and bit reversal
+    let mut mask_value = 0u32;
+    for i in 0..4 {
+        let byte = reverse_bits(bytes[3 - i]);
+        mask_value |= (byte as u32) << (8 * i);
+    }
+    mask_value
 }
 
 /// UART baud rate configuration
@@ -427,7 +586,7 @@ pub enum Register {
     },
     PllDivider(PllConfig),
     NonceRange(NonceRangeConfig),
-    TicketMask(DifficultyMask),
+    TicketMask(TicketMask),
     MiscControl {
         raw_value: u32,
     },
@@ -465,7 +624,14 @@ impl Register {
             },
             RegisterAddress::PllDivider => Register::PllDivider(raw_value.into()),
             RegisterAddress::NonceRange => Register::NonceRange(NonceRangeConfig { bytes: *bytes }),
-            RegisterAddress::TicketMask => Register::TicketMask(DifficultyMask { bytes: *bytes }),
+            RegisterAddress::TicketMask => {
+                // Decode wire bytes to TicketMask
+                // Wire bytes are already in the encoded format, we need to decode them
+                // to determine the zero_bits value
+                let mask_value = decode_ticket_mask_bytes(bytes);
+                let zero_bits = mask_value.count_ones() as u8;
+                Register::TicketMask(TicketMask { zero_bits })
+            }
             RegisterAddress::MiscControl => Register::MiscControl { raw_value },
             RegisterAddress::UartBaud => {
                 // Decode known baud rates
@@ -1488,11 +1654,16 @@ mod command_tests {
     #[test]
     fn write_ticket_mask_from_capture() {
         // From S21 Pro capture: TX: 55 AA 51 09 00 14 00 00 00 FF 08
+        // This is 8 zero_bits (40 total bits, i.e., 2^40 hashes per nonce)
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(1.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
         assert_frame_eq(
             Command::WriteRegister {
                 broadcast: true,
                 chip_address: 0x00,
-                register: Register::TicketMask(DifficultyMask::from_difficulty(256)),
+                register: Register::TicketMask(TicketMask::new(interval)),
             },
             &[
                 0x55, 0xaa, 0x51, 0x09, 0x00, 0x14, 0x00, 0x00, 0x00, 0xff, 0x08,
@@ -1990,6 +2161,158 @@ mod response_tests {
     }
 }
 
+#[cfg(test)]
+mod ticket_mask_tests {
+    use super::*;
+
+    #[test]
+    fn test_hashrate_gibihashes() {
+        let hr = Hashrate::gibihashes_per_sec(512.0);
+        // 512 GiH/s = 2^39 H/s (2^9 * 2^30)
+        assert_eq!(hr.log2().round() as u8, 39);
+
+        let hr = Hashrate::gibihashes_per_sec(1.0);
+        // 1 GiH/s = 2^30 H/s
+        assert_eq!(hr.log2().round() as u8, 30);
+
+        let hr = Hashrate::gibihashes_per_sec(1024.0);
+        // 1024 GiH/s = 2^40 H/s (2^10 * 2^30)
+        assert_eq!(hr.log2().round() as u8, 40);
+
+        // Test non-power-of-2 value
+        let hr = Hashrate::gibihashes_per_sec(500.0);
+        // 500 GiH/s ≈ 2^38.9 H/s, rounds to 39
+        assert_eq!(hr.log2().round() as u8, 39);
+    }
+
+    #[test]
+    fn test_hashrate_tebihashes() {
+        let hr = Hashrate::tebihashes_per_sec(1.0);
+        // 1 TiH/s = 2^40 H/s
+        assert_eq!(hr.log2().round() as u8, 40);
+
+        let hr = Hashrate::tebihashes_per_sec(8.0);
+        // 8 TiH/s = 2^43 H/s (2^3 * 2^40)
+        assert_eq!(hr.log2().round() as u8, 43);
+    }
+
+    #[test]
+    fn test_reporting_interval_from_rate() {
+        // 512 GiH/s (2^39), want 1 nonce/sec (2^0)
+        // Interval = 2^39 / 2^0 = 2^39
+        let interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(512.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 39);
+
+        // 1 TiH/s (2^40), want 1 nonce/sec
+        // Interval = 2^40 / 2^0 = 2^40
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(1.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 40);
+
+        // 512 GiH/s (2^39), want 2 nonces/sec (2^1)
+        // Interval = 2^39 / 2^1 = 2^38
+        let interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(512.0),
+            ReportingRate::nonces_per_sec(2.0),
+        );
+        assert_eq!(interval.exponent(), 38);
+
+        // Non-power-of-2: 500 GiH/s, want 1 nonce/sec
+        // 500 GiH/s ≈ 2^38.9, rounds to 2^39
+        let interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(500.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 39);
+    }
+
+    #[test]
+    fn test_reporting_interval_display() {
+        let interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(512.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(format!("{}", interval), "2^39");
+    }
+
+    #[test]
+    fn test_ticket_mask_wire_encoding() {
+        // Test case 1: 40 bits total (8 zero_bits)
+        // Should produce [00, 00, 00, FF]
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(1.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 40);
+        let mask = TicketMask::new(interval);
+        let bytes = mask.to_wire_bytes();
+        assert_eq!(bytes, [0x00, 0x00, 0x00, 0xFF]);
+
+        // Test case 2: 42 bits total (10 zero_bits)
+        // Should produce [00, 00, C0, FF]
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(4.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 42);
+        let mask = TicketMask::new(interval);
+        let bytes = mask.to_wire_bytes();
+        assert_eq!(bytes, [0x00, 0x00, 0xC0, 0xFF]);
+
+        // Test case 3: 48 bits total (16 zero_bits)
+        // Should produce [00, 00, FF, FF]
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(256.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 48);
+        let mask = TicketMask::new(interval);
+        let bytes = mask.to_wire_bytes();
+        assert_eq!(bytes, [0x00, 0x00, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_ticket_mask_zero_bits() {
+        // 32 bits total = 0 zero_bits
+        // Should produce [00, 00, 00, 00]
+        let interval = ReportingInterval::from_rate(
+            Hashrate::gibihashes_per_sec(4.0), // 2^32
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        assert_eq!(interval.exponent(), 32);
+        let mask = TicketMask::new(interval);
+        let bytes = mask.to_wire_bytes();
+        assert_eq!(bytes, [0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_reverse_bits() {
+        assert_eq!(reverse_bits(0x00), 0x00);
+        assert_eq!(reverse_bits(0xFF), 0xFF);
+        assert_eq!(reverse_bits(0x01), 0x80);
+        assert_eq!(reverse_bits(0x80), 0x01);
+        assert_eq!(reverse_bits(0x03), 0xC0);
+        assert_eq!(reverse_bits(0x0F), 0xF0);
+    }
+
+    #[test]
+    fn test_ticket_mask_from_trait() {
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(1.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        let mask = TicketMask::new(interval);
+
+        let bytes: [u8; 4] = mask.into();
+        assert_eq!(bytes, [0x00, 0x00, 0x00, 0xFF]);
+    }
+}
+
 // Bytes go out on the wire least-significant byte first.
 // Multi-byte fields are sent most-significant byte first, i.e., big-endian.
 
@@ -2120,8 +2443,12 @@ impl BM13xxProtocol {
         }));
 
         // Step 7: Set ticket mask (difficulty)
-        commands
-            .push(self.broadcast_write(Register::TicketMask(DifficultyMask::from_difficulty(256))));
+        // Use 2^40 reporting interval (8 zero_bits)
+        let interval = ReportingInterval::from_rate(
+            Hashrate::tebihashes_per_sec(1.0),
+            ReportingRate::nonces_per_sec(1.0),
+        );
+        commands.push(self.broadcast_write(Register::TicketMask(TicketMask::new(interval))));
 
         // Step 8: Configure IO driver strength on all chips
         commands.push(self.broadcast_write(Register::IoDriverStrength(IoDriverStrength::normal())));
@@ -2335,9 +2662,12 @@ impl BM13xxProtocol {
             RegisterAddress::NonceRange => Register::NonceRange(NonceRangeConfig {
                 bytes: value.to_le_bytes(),
             }),
-            RegisterAddress::TicketMask => Register::TicketMask(DifficultyMask {
-                bytes: value.to_le_bytes(),
-            }),
+            RegisterAddress::TicketMask => {
+                let bytes = value.to_le_bytes();
+                let mask_value = decode_ticket_mask_bytes(&bytes);
+                let zero_bits = mask_value.count_ones() as u8;
+                Register::TicketMask(TicketMask { zero_bits })
+            }
             RegisterAddress::MiscControl => Register::MiscControl { raw_value: value },
             RegisterAddress::UartBaud => Register::UartBaud(BaudRate::Custom(value)),
             RegisterAddress::UartRelay => Register::UartRelay { raw_value: value },
