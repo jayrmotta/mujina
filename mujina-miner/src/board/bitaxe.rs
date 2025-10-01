@@ -1058,7 +1058,7 @@ impl Board for BitaxeBoard {
         // After frequency ramping is complete
 
         // NonceRange = 0xB51E0000 (correct value from reference)
-        let nonce_range_value = 0x0000B51E; // Raw value from captures
+        let nonce_range_value = 0xB51E0000; // Raw value from captures
         let nonce_range_cmd = Command::WriteRegister {
             broadcast: true,
             chip_address: 0x00,
