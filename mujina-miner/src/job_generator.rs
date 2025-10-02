@@ -309,6 +309,16 @@ pub fn verify_nonce(
     nonce: u32,
     rolled_version: u16,
 ) -> Result<(BlockHash, bool), String> {
+    // Validate that job target matches nbits encoding
+    let nbits_target = Target::from_compact(CompactTarget::from_consensus(job.nbits));
+    let job_target = Target::from_le_bytes(job.target);
+    if nbits_target != job_target {
+        return Err(format!(
+            "Job target mismatch: nbits 0x{:08x} expands to {:?} but job.target is {:?}",
+            job.nbits, nbits_target, job_target
+        ));
+    }
+
     // Update header with nonce and version
     let mut header_bytes = job.header;
     header_bytes[76..80].copy_from_slice(&nonce.to_le_bytes());
@@ -327,9 +337,6 @@ pub fn verify_nonce(
 
     // Convert hash to Target for comparison
     let hash_as_target = Target::from_le_bytes(hash.to_byte_array());
-
-    // Get job target
-    let job_target = Target::from_le_bytes(job.target);
 
     // Check if hash meets target (hash must be <= target)
     let valid = hash_as_target <= job_target;
