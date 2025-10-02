@@ -161,7 +161,7 @@ pub enum ChipType {
     /// BM1366 - Newer generation chip
     BM1366,
     /// BM1370 - Used in Bitaxe Gamma and Antminer S21 Pro
-    /// 80 main cores × 16 sub-cores = 1,280 total hashing units
+    /// 1,280 hash engines organized as 80 domains of 16 engines each
     BM1370,
     /// BM1397 - Previous generation chip
     BM1397,
@@ -181,10 +181,10 @@ impl ChipType {
         }
     }
 
-    /// Get expected core count for this chip type, if known
+    /// Get expected hash engine count for this chip type, if known
     pub fn core_count(&self) -> Option<u32> {
         match self {
-            Self::BM1370 => Some(1280), // 80 × 16
+            Self::BM1370 => Some(1280), // 80 domains × 16 engines
             _ => None,
         }
     }

@@ -227,9 +227,10 @@ impl MiningStats {
         info!("  Difficulty: {}", self.difficulty);
 
         // Theoretical hashrate based on chip specifications
-        // BM1370 has 1280 cores, each doing 1 hash per clock cycle
+        // BM1370 has 1280 hash engines, each doing 1 hash per clock cycle
         const TARGET_FREQUENCY_MHZ: f32 = 500.0;
-        let theoretical_hashrate_mhs = TARGET_FREQUENCY_MHZ as f64 * 1280.0; // MH/s
+        const BM1370_HASH_ENGINES: f64 = 1280.0;
+        let theoretical_hashrate_mhs = TARGET_FREQUENCY_MHZ as f64 * BM1370_HASH_ENGINES;
         info!(
             "  Hashrate (theoretical): {:.2} MH/s at {} MHz",
             theoretical_hashrate_mhs, TARGET_FREQUENCY_MHZ
