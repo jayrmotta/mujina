@@ -141,7 +141,7 @@ This is an active development project. Current focus areas:
 - [x] GPIO control for ASIC reset
 - [x] I2C peripheral control implementation
 - [x] EMC2101 fan controller with temperature monitoring
-- [ ] TPS546 power management controller
+- [x] TPS546 power management controller
 - [ ] Additional temperature sensors (TMP75)
 - [ ] Power monitoring (INA260)
 - [ ] Stratum pool communication
