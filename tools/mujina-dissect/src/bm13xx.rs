@@ -308,7 +308,7 @@ impl ResponseStreamingParser {
     }
 }
 
-/// Standalone BM13xx command frame parser (shared between old and new implementations)
+/// Standalone BM13xx command frame parser
 fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
     if data.len() < 5 {
         return Err(ProtocolError::InvalidFrame);
@@ -325,12 +325,13 @@ fn parse_bm13xx_command_frame(data: &[u8]) -> Result<Command, ProtocolError> {
 
     // Validate CRC
     let crc_valid = if is_work {
-        // Work frames use CRC16
+        // Work frames use CRC16 (big-endian on wire)
         if data.len() >= 4 {
             let payload_end = data.len() - 2;
             let crc_bytes = &data[payload_end..];
             let payload = &data[2..payload_end];
-            let expected_crc = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
+            // Extract CRC from wire (big-endian: high byte first)
+            let expected_crc = u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]);
             let calculated_crc = crc16(payload);
             calculated_crc == expected_crc
         } else {

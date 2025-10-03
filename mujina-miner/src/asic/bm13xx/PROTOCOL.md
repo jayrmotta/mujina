@@ -60,29 +60,32 @@ All frames follow this basic structure:
 
 ## Byte Order (Endianness)
 
-**All multi-byte values in the BM13xx protocol use little-endian byte order.**
+The protocol uses **little-endian** for data fields and **big-endian** for
+CRC16 checksums.
 
-This means for multi-byte values:
-- The least significant byte (LSB) is transmitted first
-- The most significant byte (MSB) is transmitted last
+### Data Fields (Little-Endian)
 
-Examples:
-- 16-bit value `0x1234` → transmitted as `[0x34, 0x12]`
-- 32-bit value `0x12345678` → transmitted as `[0x78, 0x56, 0x34, 0x12]`
+Multi-byte data fields transmit least significant byte first:
+- **32-bit values**: nonce, nbits, ntime, version, register values
+  - Example: `0x12345678` → `[0x78, 0x56, 0x34, 0x12]`
+- **16-bit values**: version field in responses
+  - Example: `0x1234` → `[0x34, 0x12]`
 
-Affected fields:
-- **16-bit values**: version, chip_id, CRC16
-- **32-bit values**: nonce, nbits, ntime, register values
+### Checksums (Big-Endian)
 
-Special cases:
-- **chip_id in responses**: The 2-byte chip_id field that appears in all read 
-register responses should be treated as a fixed byte sequence `[0x13, 0x70]` 
-rather than as an integer value
-- **Hash values** (merkle_root, prev_block_hash): These are byte arrays that
-should be transmitted as-is without endianness conversion
-- **Single bytes**: No endianness applies (job_id, midstate_num, etc.)
-- **CRC16 in work frames**: Unlike other 16-bit values, CRC16 in work frames
-is stored in big-endian format (MSB first)
+CRC16 checksums in job packets use network byte order (big-endian), transmitting
+the high byte first. This follows common convention for integrity checks even in
+otherwise little-endian protocols.
+- **CRC16**: `0x6b18` → `[0x6b, 0x18]`
+
+### Special Cases
+
+- **Hash values** (merkle_root, prev_block_hash): 32-byte SHA-256 hashes
+  transmitted in big-endian byte order as received from Bitcoin libraries, without
+  endianness conversion
+- **chip_id in responses**: Treat as fixed byte sequence `[0x13, 0x70]` rather
+  than an integer value
+- **Single bytes**: No endianness applies (job_id, chip_address, etc.)
 
 ## Command Types
 
@@ -711,10 +714,12 @@ Time 100ms:  Receive nonce with Job ID 0x30 → Valid for current block
   - Polynomial: 0x05
   - Init: 0x1F
   - Calculated over all bytes after preamble
+  - Transmitted as single byte
 - **CRC16**: Used for job packets only
   - Polynomial: 0x1021 (CRC-16-CCITT-FALSE)
   - Init: 0xFFFF
   - Calculated over all bytes after preamble, before CRC
+  - Transmitted in big-endian byte order (see Byte Order section above)
 
 ### Version Rolling and Midstates
 

@@ -3,12 +3,6 @@
 //! This module handles the encoding and decoding of commands and responses
 //! for BM13xx family chips (BM1366, BM1370, etc).
 //!
-//! TODO: Build unit tests based on known serial captures
-//! - Test Command::try_parse_frame with actual captured work frames
-//! - Test CRC16 big-endian validation with known good/bad frames
-//! - Test JobFull parsing with real mining job data from captures
-//! - Add response frame parsing tests when Response::try_parse_frame is implemented
-//!
 //! TODO: Remove redundancy in BM13xx protocol implementation
 //! - Consolidate CRC validation logic between decoder and dissector code paths
 //! - Extract common frame parsing utilities to reduce duplication
@@ -1137,7 +1131,8 @@ impl Encoder<Command> for FrameCodec {
             Command::JobFull { .. } | Command::JobMidstate { .. } => {
                 // Calculate CRC16 over flags + length + data
                 let crc = crc16(&dst[start_pos..]);
-                dst.put_u16_le(crc);
+                // Wire format: CRC transmitted big-endian (high byte, low byte)
+                dst.put_slice(&crc.to_be_bytes());
             }
             _ => {
                 // Calculate CRC5 over everything after preamble
@@ -1147,12 +1142,11 @@ impl Encoder<Command> for FrameCodec {
         }
 
         // Log the encoded frame for debugging
-        let frame_bytes = &dst[dst.len() - (dst.len() - start_pos + 2)..];
         trace!(
             "TX: {:?} ({} bytes) => {:02x?}",
             command,
-            frame_bytes.len(),
-            frame_bytes
+            dst.len(),
+            dst.as_ref()
         );
 
         Ok(())
@@ -1735,11 +1729,11 @@ mod command_tests {
         assert_eq!(&frame[50..82], &job.prev_block_hash);
         assert_eq!(&frame[82..86], &job.version);
 
-        // Verify CRC16
+        // Verify CRC16 (big-endian)
         assert_eq!(frame.len(), 88);
         let crc_bytes = &frame[86..88];
         let calculated_crc = crc16(&frame[2..86]);
-        let frame_crc = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
+        let frame_crc = u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]);
         assert_eq!(calculated_crc, frame_crc);
     }
 

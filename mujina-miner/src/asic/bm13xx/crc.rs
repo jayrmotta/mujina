@@ -55,19 +55,6 @@ pub fn crc16(data: &[u8]) -> u16 {
     CRC16.finish_crc(&crc)
 }
 
-/// Validates data integrity using the CRC-16-FALSE algorithm.
-///
-/// This function checks if the data matches the provided CRC-16 value.
-/// Unlike CRC-5, CRC-16 is typically provided as a separate value rather
-/// than being appended and validated to zero.
-pub fn crc16_is_valid(data: &[u8], expected_crc: &[u8]) -> bool {
-    if expected_crc.len() != 2 {
-        return false;
-    }
-    let expected = u16::from_le_bytes([expected_crc[0], expected_crc[1]]);
-    crc16(data) == expected
-}
-
 const CRC16_INIT: u16 = 0xFFFF;
 
 const CRC16: CrcAlgo<u16> = CrcAlgo::<u16>::new(
@@ -109,5 +96,29 @@ mod tests {
     #[test_case(&[0xaa, 0x55, 0x13, 0x70, 0x00, 0x00, 0x00, 0x00, 0x06]; "read_response")]
     fn validate(frame: &[u8]) {
         assert!(super::crc5_is_valid(&frame[2..]));
+    }
+
+    #[test]
+    fn crc16_matches_esp_miner_job() {
+        // Exact JobFull frame from an esp-miner capture
+        // Validates our CRC16 algorithm and byte order match reference implementation
+        let frame: Vec<u8> = vec![
+            0x55, 0xaa, 0x21, 0x56, 0x18, 0x01, 0x00, 0x00, 0x00, 0x00, 0x38, 0xfa, 0x01, 0x17,
+            0xdc, 0x17, 0xd6, 0x68, 0x15, 0x16, 0xab, 0x3d, 0x16, 0x42, 0xbb, 0x1f, 0xe2, 0xe2,
+            0x37, 0x7f, 0x8a, 0xc5, 0x83, 0xe5, 0xda, 0x99, 0x6c, 0x6b, 0xc7, 0x05, 0x3e, 0xae,
+            0x56, 0x4b, 0x02, 0x03, 0xcc, 0x4e, 0xd2, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xa2, 0x5c, 0x00, 0x00, 0xa1, 0xe7, 0xab, 0x5e, 0x5f, 0x24, 0x46, 0xa3,
+            0x5f, 0x9c, 0xbb, 0xea, 0x3f, 0x53, 0x16, 0xe5, 0x4e, 0x39, 0x93, 0xde, 0x00, 0x00,
+            0x00, 0x20, 0x6b, 0x18,
+        ];
+
+        // CRC is calculated over payload (bytes 2..86), excluding preamble and CRC itself
+        let payload = &frame[2..86];
+        let calculated_crc = super::crc16(payload);
+
+        // Extract CRC from frame (wire format is big-endian: high byte first)
+        let wire_crc = u16::from_be_bytes([frame[86], frame[87]]);
+
+        assert_eq!(calculated_crc, wire_crc);
     }
 }
