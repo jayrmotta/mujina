@@ -836,6 +836,7 @@ pub enum Command {
 /// Hash values (merkle_root, prev_block_hash) are stored in big-endian format.
 #[derive(Debug, Clone)]
 pub struct JobFullFormat {
+    /// 4-bit job identifier (0-15), encoded into bits 6-3 of job_header on wire
     pub job_id: u8,
     pub num_midstates: u8, // Typically 0x01 for BM1370
     pub starting_nonce: [u8; 4],
@@ -981,7 +982,9 @@ impl Command {
                 dst.put_u8(TOTAL_LEN);
 
                 // Write job data
-                dst.put_u8(job_data.job_id);
+                // job_id is a 4-bit value (0-15), encode into bits 6-3 of job_header
+                debug_assert!(job_data.job_id <= 15, "job_id must be 0-15");
+                dst.put_u8(job_data.job_id << 3);
                 dst.put_u8(job_data.num_midstates);
                 dst.put_slice(&job_data.starting_nonce);
                 dst.put_slice(&job_data.nbits);
@@ -1010,7 +1013,9 @@ impl Command {
                 dst.put_u8(total_len);
 
                 // Write job data
-                dst.put_u8(job_data.job_id);
+                // job_id is a 4-bit value (0-15), encode into bits 6-3 of job_header
+                debug_assert!(job_data.job_id <= 15, "job_id must be 0-15");
+                dst.put_u8(job_data.job_id << 3);
                 dst.put_u8(job_data.num_midstates);
                 dst.put_slice(&job_data.starting_nonce);
                 dst.put_slice(&job_data.nbits);
@@ -1094,7 +1099,8 @@ impl Response {
                 let version = bytes.get_u16_le();
                 // CRC already consumed
 
-                // Extract job_id (bits 7-4) and subcore_id (bits 3-0) from result_header
+                // Extract job_id and subcore_id from result_header
+                // job_id is a 4-bit field (0-15) at bits 7-4 of result_header
                 let job_id = (result_header >> 4) & 0x0f;
                 let subcore_id = result_header & 0x0f;
 
@@ -1855,7 +1861,7 @@ mod response_tests {
         assert_eq!(nonce, 0x40a60018);
         assert_eq!(midstate_num, 0x02);
 
-        // Result header: 0x99 → job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
+        // Result header: 0x99 → bits[7:4]=9 (job_id), bits[3:0]=9 (subcore_id)
         assert_eq!(job_id, 9);
         assert_eq!(subcore_id, 9);
 
@@ -1872,6 +1878,7 @@ mod response_tests {
         // Additional nonce responses from S21 Pro capture
         let test_cases = vec![
             // RX: AA 55 07 35 CD CF 02 5E 00 2E 96
+            // result_header=0x5e: bits[7:4]=5, bits[3:0]=14
             (
                 &[
                     0xaa, 0x55, 0x07, 0x35, 0xcd, 0xcf, 0x02, 0x5e, 0x00, 0x2e, 0x96,
@@ -1883,6 +1890,7 @@ mod response_tests {
                 0x2e00,
             ),
             // RX: AA 55 46 03 32 E7 00 C3 2C 83 99
+            // result_header=0xc3: bits[7:4]=12, bits[3:0]=3
             (
                 &[
                     0xaa, 0x55, 0x46, 0x03, 0x32, 0xe7, 0x00, 0xc3, 0x2c, 0x83, 0x99,

@@ -100,7 +100,7 @@ pub struct BitaxeBoard {
     event_rx: Option<tokio::sync::mpsc::Receiver<BoardEvent>>,
     /// Current job ID
     current_job_id: Option<u64>,
-    /// Job ID counter for chip-internal job tracking (0-255)
+    /// Job ID counter for chip-internal job tracking (4-bit field: 0-15)
     next_job_id: u8,
     /// Handle for the statistics task
     stats_task_handle: Option<tokio::task::JoinHandle<()>>,
@@ -1088,6 +1088,10 @@ impl Board for BitaxeBoard {
         };
         self.send_config_command(version_cmd_final).await?;
 
+        // Allow PLL and chip configuration to settle before sending jobs
+        tracing::debug!("Waiting for chip configuration to settle");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
         // Create event channel
         let (tx, rx) = tokio::sync::mpsc::channel(100);
         self.event_tx = Some(tx);
@@ -1124,26 +1128,21 @@ impl Board for BitaxeBoard {
             .await
             .map_err(BoardError::Communication)?;
 
+        tracing::info!(
+            job_id = job.job_id,
+            chip_count = self.chip_infos.len(),
+            chip_job_id = self.next_job_id,
+            "Sent job to chips"
+        );
+
         // Update job tracking
         self.current_job_id = Some(job.job_id);
 
-        // Increment job ID counter
-        // The BM13xx protocol uses a u8 job_id field (0-255).
-        // We increment by 24 and wrap at 128, which ensures job IDs are well-distributed
-        // and reduces the chance of job ID collision if the chip is slow to process old jobs.
-        // The value 24 appears to come from reference implementations, though the reason
-        // for this specific value isn't documented. A simpler +1 would also work.
-        self.next_job_id = (self.next_job_id + 24) % 128;
+        // Increment job ID counter (4-bit field: 0-15)
+        self.next_job_id = (self.next_job_id + 1) % 16;
 
         // Spawn job completion timer
         self.spawn_job_timer(self.current_job_id);
-
-        tracing::info!(
-            "Sent job {} to {} chip(s) with internal ID {}",
-            job.job_id,
-            self.chip_infos.len(),
-            self.next_job_id.saturating_sub(24)
-        );
 
         Ok(())
     }

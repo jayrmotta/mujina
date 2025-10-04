@@ -209,11 +209,13 @@ big-endian format (MSB first)
 
 **Job_Data Structure (82 bytes):**
 ```
-| job_header | num_midstates | starting_nonce[4] | nbits[4] | ntime[4] | 
+| job_header | num_midstates | starting_nonce[4] | nbits[4] | ntime[4] |
 merkle_root[32] | prev_block_hash[32] | version[4] |
 ```
-- **job_header** (1 byte): Identifies this job for nonce responses
-  - Contains 4-bit job_id in bits 6-3
+- **job_header** (1 byte): Container for job identification
+  - Bits 6-3: 4-bit job_id field (values 0-15)
+  - Bits 7, 2-0: Unused by chip (should be zero)
+  - The chip extracts bits 6-3 as the job identifier
 - **num_midstates** (1 byte): Number of midstates (always 0x01 for BM1370)
   - ESP-miner hardcodes this to 0x01 regardless of version rolling
   - Version rolling is actually controlled by register 0xA4 (VERSION_MASK)
@@ -234,7 +236,7 @@ merkle_root[32] | prev_block_hash[32] | version[4] |
 **Example Job Packet:**
 ```
 55 AA 21 56                              # Preamble + Type + Length
-18                                       # job_header (job_id = 3)
+18                                       # job_header: bits[6:3]=0b0011 (job_id field=3)
 01                                       # num_midstates = 1
 00 00 00 00                              # starting_nonce
 B4 3A 0E 17                              # nbits
@@ -304,9 +306,8 @@ implementation.
 
 **Purpose of Core and Job ID Encoding:**
 The encoding allows ASICs to:
-- Run multiple jobs concurrently (up to 128 different jobs)
-- Identify which specific core found a valid nonce (main core + sub-core)
 - Match nonces back to their original work assignments
+- Identify which specific core found a valid nonce (main core + sub-core)
 - Support efficient work distribution across all cores
 
 **Field Encoding by Chip Type:**
@@ -318,14 +319,28 @@ The encoding allows ASICs to:
 - **Midstate_Num**: Chip/core identifier (uncertain - may encode chip ID in 
 multi-chip chains)
 - **Result_Header**: 8-bit field containing:
-  - Bits 7-4: 4-bit job_id (0-15) 
+  - Bits 7-4: 4-bit job_id field (0-15)
   - Bits 3-0: 4-bit subcore_id (0-15)
 - **Version**: 16-bit version bits (little-endian)
-  - When version rolling enabled: Contains rolled bits to be shifted left 13 
+  - When version rolling enabled: Contains rolled bits to be shifted left 13
 positions
 
+**Job ID Bitfield Mapping:**
+The 4-bit job_id field (0-15) appears at different bit positions in sent jobs
+vs. returned nonces:
+- **Sent**: job_header[6:3] (encode: `job_header = job_id << 3`)
+- **Returned**: result_header[7:4] (extract: `job_id = result_header >> 4`)
+
+**Implementation Note:**
+mujina-miner treats job_id as a true 4-bit field (0-15) throughout the
+codebase. Reference implementations (esp-miner, emberone-miner) take a
+different approach: they use full u8 values (24, 48, 72...), send them
+directly, and reconstruct them from responses using `(result_header & 0xf0) >>
+1`. Both approaches work, but treating job_id as 4-bit aligns more naturally
+with how the chip actually operates.
+
 Example BM1370 response: `AA 55 18 00 A6 40 02 99 22 F9 91`
-- Nonce: 0x40A60018 → Main core 12, nonce value 0x00A60018
+- Nonce: 0x40A60018 → Main core 32, nonce value 0x00A60018
 - Result_Header: 0x99 → job_id=9 (bits 7-4), subcore_id=9 (bits 3-0)
 - Version: 0xF922 → Version bits 0x045F2000 (after shifting)
 
@@ -702,11 +717,11 @@ block template it belongs to
 
 #### Example Timeline
 ```
-Time 0ms:    Send Job 0x00 (mining block height 850,000)
-Time 50ms:   Send Job 0x18 (same block, updated transactions)
-Time 90ms:   NEW BLOCK! Send Job 0x30 (mining block height 850,001)
-Time 95ms:   Receive nonce with Job ID 0x00 → Discard (old block)
-Time 100ms:  Receive nonce with Job ID 0x30 → Valid for current block
+Time 0ms:    Send Job with job_id=0 (mining block height 850,000)
+Time 50ms:   Send Job with job_id=1 (same block, updated transactions)
+Time 90ms:   NEW BLOCK! Send Job with job_id=2 (mining block height 850,001)
+Time 95ms:   Receive nonce with job_id=0 → Discard (old block)
+Time 100ms:  Receive nonce with job_id=2 → Valid for current block
 ```
 
 ### CRC Calculation
