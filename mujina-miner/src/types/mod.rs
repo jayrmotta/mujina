@@ -4,9 +4,6 @@
 //! the miner. It re-exports commonly used types from rust-bitcoin and defines
 //! mining-specific types.
 
-mod extranonce2;
-pub use extranonce2::{Extranonce2, Extranonce2Error};
-
 // Re-export frequently used bitcoin types for convenience
 pub use bitcoin::block::Header as BlockHeader;
 pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};

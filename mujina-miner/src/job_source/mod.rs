@@ -41,19 +41,24 @@
 
 use std::fmt;
 
-use crate::types::Extranonce2Error;
 use async_trait::async_trait;
 
 // Submodules
-mod iterator;
+mod extranonce2;
 mod job;
+mod merkle;
+mod version;
 
 #[cfg(test)]
 mod test_blocks;
 
 // Re-export types from submodules
-pub use iterator::{JobWork, JobWorkIterator};
-pub use job::{MiningJob, Share};
+pub use extranonce2::{Extranonce2, Extranonce2Error, Extranonce2Template};
+pub use job::{Job, Share};
+pub use merkle::{MerkleRootKind, MerkleRootTemplate};
+pub use version::VersionTemplate;
+
+// pub use iterator::{JobWork, JobWorkIterator};
 
 // Re-export submodules once they're implemented
 // pub mod stratum_v1;
@@ -97,7 +102,7 @@ pub enum JobSourceError {
 
     /// Extranonce2 error
     #[error("Extranonce2 error: {0}")]
-    Extranonce2(#[from] Extranonce2Error),
+    Extranonce2(#[from] extranonce2::Extranonce2Error),
 
     /// Other errors
     #[error("{0}")]
@@ -126,7 +131,7 @@ pub trait JobSource: Send + Sync {
     ///
     /// This may block until work is available. Returns `None` if
     /// the source is shutting down.
-    async fn get_job(&mut self) -> Result<Option<MiningJob>>;
+    async fn get_job(&mut self) -> Result<Option<Job>>;
 
     /// Submit a share (solved work) to the source.
     ///
