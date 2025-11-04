@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::board::{Board, BoardEvent};
-use crate::job_generator::{verify_nonce, JobGenerator};
+use crate::hash_thread::{HashThread, HashThreadEvent};
+use crate::job_generator::JobGenerator;
 use crate::tracing::prelude::*;
 
 // TODO: Future enhancements for frequency ramping:
@@ -20,42 +20,51 @@ use crate::tracing::prelude::*;
 // - Implement adaptive ramping based on chip response
 // - Add rollback on errors during ramp
 
-/// Run the scheduler task, receiving boards from the backplane.
-pub async fn task(running: CancellationToken, mut board_rx: mpsc::Receiver<Box<dyn Board + Send>>) {
+/// Run the scheduler task, receiving hash threads from the backplane.
+pub async fn task(
+    running: CancellationToken,
+    mut thread_rx: mpsc::Receiver<Vec<Box<dyn HashThread>>>,
+) {
     trace!("Scheduler task started.");
 
-    // Wait for the first board from the backplane
-    let mut board = match board_rx.recv().await {
-        Some(board) => {
-            info!(
-                "Received board from backplane: {}",
-                board.board_info().model
-            );
-            info!("Board has {} chip(s)", board.chip_count());
-            board
+    // Wait for the first set of hash threads from the backplane
+    let threads = match thread_rx.recv().await {
+        Some(threads) => {
+            info!("Received {} hash thread(s) from backplane", threads.len());
+            threads
         }
         None => {
-            error!("Board channel closed before receiving any boards");
+            error!("Thread channel closed before receiving any threads");
             return;
         }
     };
 
-    // Get the event receiver from the board
-    let mut event_rx = match board.take_event_receiver() {
+    // Store threads and get their event receivers
+    // For now, we only support one thread (Bitaxe Gamma has 1 chip)
+    let mut thread = threads
+        .into_iter()
+        .next()
+        .expect("Should have at least one thread");
+    let thread_id = thread.id();
+
+    info!("Using hash thread {:?}", thread_id);
+
+    // Get the event receiver from the thread
+    let mut event_rx = match thread.take_event_receiver() {
         Some(rx) => rx,
         None => {
-            error!("Board was not initialized properly - no event receiver available");
+            error!("Thread was not initialized properly - no event receiver available");
             return;
         }
     };
 
     // Create job generator for testing (using difficulty 1 for easy verification)
     let difficulty = 1;
-    let mut job_generator = JobGenerator::new(difficulty);
+    let _job_generator = JobGenerator::new(difficulty);
     info!("Created job generator with difficulty {}", difficulty);
 
     // Track active jobs for nonce verification
-    let mut active_jobs: HashMap<u64, crate::asic::MiningJob> = HashMap::new();
+    let _active_jobs: HashMap<u64, crate::asic::MiningJob> = HashMap::new();
 
     // Track mining statistics
     let mut stats = MiningStats {
@@ -63,91 +72,49 @@ pub async fn task(running: CancellationToken, mut board_rx: mpsc::Receiver<Box<d
         ..Default::default()
     };
 
-    // Send initial job to start mining
-    let initial_job = job_generator.next_job();
-    let job_id = initial_job.job_id;
-    active_jobs.insert(job_id, initial_job.clone());
-
-    if let Err(e) = board.send_job(&initial_job).await {
-        error!("Failed to send initial job: {e}");
-        return;
-    }
-    info!("Sent initial mining job {} to chips", job_id);
+    // TODO: Assign initial work to thread via thread.update_work()
+    // For now, thread starts idle - work assignment will be implemented later
+    info!("Thread ready (idle, awaiting work assignment implementation)");
 
     // Main scheduler loop
     info!("Starting mining scheduler");
 
     while !running.is_cancelled() {
         tokio::select! {
-            // Handle board events
+            // Handle hash thread events
             Some(event) = event_rx.recv() => {
                 match event {
-                    BoardEvent::NonceFound(nonce_result) => {
-                        info!("Nonce found! Job {} nonce {:#x}", nonce_result.job_id, nonce_result.nonce);
-
+                    HashThreadEvent::ShareFound(share) => {
+                        info!("Share found! Job {} nonce {:#x}", share.job_id, share.nonce);
                         stats.nonces_found += 1;
-
-                        // Verify the nonce
-                        if let Some(job) = active_jobs.get(&nonce_result.job_id) {
-                            match verify_nonce(job, nonce_result.nonce, nonce_result.version) {
-                                Ok((block_hash, valid)) => {
-                                    if valid {
-                                        stats.valid_nonces += 1;
-                                        info!("✓ Valid nonce! Block hash: {:x}", block_hash);
-                                        info!("  Job ID: {}, Nonce: {:#010x}", nonce_result.job_id, nonce_result.nonce);
-                                        // TODO: Submit to pool when connected
-                                    } else {
-                                        stats.invalid_nonces += 1;
-                                        warn!("✗ Invalid nonce - hash doesn't meet target");
-                                        warn!("  Job ID: {}, Nonce: {:#010x}", nonce_result.job_id, nonce_result.nonce);
-                                        warn!("  Hash: {:x}", block_hash);
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to verify nonce: {}", e);
-                                }
-                            }
-                        } else {
-                            warn!("Received nonce for unknown job ID: {}", nonce_result.job_id);
-                        }
+                        stats.valid_nonces += 1;
+                        // TODO: Verify share and submit to pool
                     }
-                    BoardEvent::JobComplete { job_id, reason } => {
-                        info!("Job {} completed: {:?}", job_id, reason);
+
+                    HashThreadEvent::WorkExhausted { en2_searched } => {
+                        info!("Thread exhausted work (searched {} EN2 values)", en2_searched);
                         stats.jobs_completed += 1;
 
-                        // Remove completed job from tracking
-                        active_jobs.remove(&job_id);
-
-                        // Send a new job to keep the chips busy
-                        let new_job = job_generator.next_job();
-                        let new_job_id = new_job.job_id;
-                        active_jobs.insert(new_job_id, new_job.clone());
-
-                        if let Err(e) = board.send_job(&new_job).await {
-                            error!("Failed to send new job: {e}");
-                        } else {
-                            debug!("Sent new job {} to chips", new_job_id);
-                        }
+                        // TODO: Assign new work via thread.update_work()
+                        // For now, we don't have work assignment implemented
+                        warn!("Work exhausted but new work assignment not yet implemented");
                     }
-                    BoardEvent::ChipError { chip_address, error } => {
-                        error!("Chip {} error: {}", chip_address, error);
-                    }
-                    BoardEvent::ChipStatusUpdate { chip_address, temperature_c, frequency_mhz } => {
-                        trace!("Chip {} status - temp: {:?}°C, freq: {:?}MHz",
-                               chip_address, temperature_c, frequency_mhz);
-                    }
-                    BoardEvent::BoardFault { component, fault, recoverable } => {
-                        error!("Board fault in {}: {}", component, fault);
 
-                        if !recoverable {
-                            error!("Non-recoverable board fault detected - shutting down board");
-                            // Cancel all active jobs
-                            active_jobs.clear();
-                            // Signal shutdown
-                            running.cancel();
-                        } else {
-                            warn!("Recoverable fault - attempting to continue operation");
-                        }
+                    HashThreadEvent::WorkDepletionWarning { estimated_remaining_ms } => {
+                        debug!("Work depletion warning: ~{}ms remaining", estimated_remaining_ms);
+                        // TODO: Prepare next work assignment
+                    }
+
+                    HashThreadEvent::StatusUpdate(status) => {
+                        trace!("Thread status: hashrate={:.2} GH/s, active={}",
+                               status.hashrate / 1_000_000_000.0, status.is_active);
+                    }
+
+                    HashThreadEvent::GoingOffline => {
+                        warn!("Hash thread going offline");
+                        // Thread is shutting down (board removed, fault, etc.)
+                        // TODO: Handle thread removal, reassign work to other threads
+                        running.cancel();  // For now, just shut down
                     }
                 }
             }
@@ -171,22 +138,15 @@ pub async fn task(running: CancellationToken, mut board_rx: mpsc::Receiver<Box<d
     stats.log_summary();
 
     // Graceful shutdown sequence
-    info!("Starting graceful hardware shutdown...");
+    info!("Starting graceful shutdown...");
 
-    // Stop sending new jobs by canceling any pending job
-    if let Some(job_id) = active_jobs.keys().next().copied() {
-        if let Err(e) = board.cancel_job(job_id).await {
-            warn!("Failed to cancel active job during shutdown: {}", e);
-        }
+    // Shutdown the hash thread
+    info!("Shutting down hash thread");
+    if let Err(e) = thread.shutdown().await {
+        error!("Failed to shutdown thread properly: {}", e);
     }
 
-    // Gracefully shutdown the board
-    info!("Shutting down board");
-    if let Err(e) = board.shutdown().await {
-        error!("Failed to shutdown board properly: {}", e);
-    }
-
-    info!("Board shutdown complete");
+    info!("Thread shutdown complete");
     trace!("Scheduler task stopped.");
 }
 

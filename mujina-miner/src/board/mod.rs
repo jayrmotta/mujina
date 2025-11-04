@@ -5,9 +5,10 @@ use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::asic::{ChipError, ChipInfo, MiningJob, NonceResult};
+use crate::hash_thread::{HashThread, ThreadRemovalSignal};
 use crate::transport::UsbDeviceInfo;
 
 /// Events emitted by a board during operation.
@@ -121,6 +122,18 @@ pub trait Board: Send {
     /// state. The exact implementation is board-specific but typically includes
     /// stopping hashing and ensuring chips are in a low-power or reset state.
     async fn shutdown(&mut self) -> Result<(), BoardError>;
+
+    /// Create hash threads for this board
+    ///
+    /// Transfers serial channel ownership to threads. Board retains peripheral
+    /// control (power, cooling, monitoring) and removal authority via watch channel.
+    ///
+    /// Returns: (threads, removal_signal)
+    /// - threads: Vec of HashThread trait objects for scheduler
+    /// - removal_signal: Sender for triggering thread removal with specific reason
+    async fn create_hash_threads(
+        &mut self,
+    ) -> Result<(Vec<Box<dyn HashThread>>, watch::Sender<ThreadRemovalSignal>), BoardError>;
 }
 
 /// Information about a board

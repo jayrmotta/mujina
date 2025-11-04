@@ -5,6 +5,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::{
     io::{AsyncRead, ReadBuf},
+    sync::watch,
     time,
 };
 use tokio_stream::StreamExt;
@@ -17,6 +18,7 @@ use crate::asic::bm13xx::{
 };
 use crate::asic::{ChipInfo, MiningJob};
 use crate::board::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
+use crate::hash_thread::{HashThread, ThreadRemovalSignal};
 use crate::hw_trait::gpio::{Gpio, GpioPin, PinValue};
 use crate::hw_trait::i2c::I2c;
 use crate::mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c;
@@ -83,9 +85,9 @@ pub struct BitaxeBoard {
     fan_controller: Option<Emc2101<BitaxeRawI2c>>,
     /// Power management controller (TPS546D24A)
     power_controller: Option<Tps546<BitaxeRawI2c>>,
-    /// Writer for sending commands to chips
-    data_writer: FramedWrite<SerialWriter, bm13xx::FrameCodec>,
-    /// Reader for receiving responses from chips (transferred to event monitor during initialize)
+    /// Writer for sending commands to chips (transferred to hash thread)
+    data_writer: Option<FramedWrite<SerialWriter, bm13xx::FrameCodec>>,
+    /// Reader for receiving responses from chips (transferred to hash thread)
     data_reader: Option<FramedRead<TracingReader<SerialReader>, bm13xx::FrameCodec>>,
     /// Control handle for data channel (for baud rate changes)
     #[expect(dead_code, reason = "will be used when baud rate change is fixed")]
@@ -151,7 +153,7 @@ impl BitaxeBoard {
             i2c,
             fan_controller: None,
             power_controller: None,
-            data_writer: FramedWrite::new(data_writer, bm13xx::FrameCodec::default()),
+            data_writer: Some(FramedWrite::new(data_writer, bm13xx::FrameCodec::default())),
             data_reader: Some(FramedRead::new(
                 tracing_reader,
                 bm13xx::FrameCodec::default(),
@@ -239,6 +241,8 @@ impl BitaxeBoard {
     /// This is used during initialization to configure PLL, version rolling, etc.
     pub async fn send_config_command(&mut self, command: Command) -> Result<(), BoardError> {
         self.data_writer
+            .as_mut()
+            .expect("data_writer should be available during initialization")
             .send(command)
             .await
             .map_err(BoardError::Communication)
@@ -265,6 +269,8 @@ impl BitaxeBoard {
         let discover_cmd = BM13xxProtocol::discover_chips();
 
         self.data_writer
+            .as_mut()
+            .expect("data_writer should be available during chip discovery")
             .send(discover_cmd)
             .await
             .map_err(BoardError::Communication)?;
@@ -1124,6 +1130,10 @@ impl Board for BitaxeBoard {
 
         // Send the job command
         self.data_writer
+            .as_mut()
+            .ok_or(BoardError::InitializationFailed(
+                "data_writer not available (transferred to hash thread?)".into(),
+            ))?
             .send(command)
             .await
             .map_err(BoardError::Communication)?;
@@ -1203,6 +1213,37 @@ impl Board for BitaxeBoard {
 
         tracing::info!("Bitaxe board shutdown complete");
         Ok(())
+    }
+
+    async fn create_hash_threads(
+        &mut self,
+    ) -> Result<(Vec<Box<dyn HashThread>>, watch::Sender<ThreadRemovalSignal>), BoardError> {
+        // Create removal signal channel (starts as Running)
+        let (removal_tx, removal_rx) = watch::channel(ThreadRemovalSignal::Running);
+
+        // Take ownership of serial I/O streams
+        let data_reader = self
+            .data_reader
+            .take()
+            .ok_or(BoardError::InitializationFailed(
+                "No data reader available - already taken or not initialized".into(),
+            ))?;
+
+        let data_writer = self
+            .data_writer
+            .take()
+            .ok_or(BoardError::InitializationFailed(
+                "No data writer available - already taken or not initialized".into(),
+            ))?;
+
+        // Create BM13xxThread with the streams
+        let thread =
+            crate::hash_thread::bm13xx::BM13xxThread::new(data_reader, data_writer, removal_rx);
+
+        tracing::info!("Created BM13xx hash thread from BitaxeBoard");
+
+        // Return thread and removal signal
+        Ok((vec![Box::new(thread)], removal_tx))
     }
 }
 

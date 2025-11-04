@@ -10,7 +10,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::tracing::prelude::*;
 use crate::{
     backplane::Backplane,
-    board::Board,
+    hash_thread::HashThread,
     scheduler,
     transport::{TransportEvent, UsbTransport},
 };
@@ -34,7 +34,7 @@ impl Daemon {
     pub async fn run(self) -> anyhow::Result<()> {
         // Create channels for component communication
         let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
-        let (board_tx, board_rx) = mpsc::channel::<Box<dyn Board + Send>>(10);
+        let (thread_tx, thread_rx) = mpsc::channel::<Vec<Box<dyn HashThread>>>(10);
 
         // Create and start USB transport discovery
         let usb_transport = UsbTransport::new(transport_tx.clone());
@@ -50,7 +50,7 @@ impl Daemon {
         });
 
         // Create and start backplane
-        let mut backplane = Backplane::new(transport_rx, board_tx);
+        let mut backplane = Backplane::new(transport_rx, thread_tx);
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
             async move {
@@ -67,9 +67,9 @@ impl Daemon {
             }
         });
 
-        // Start the scheduler with board receiver
+        // Start the scheduler with thread receiver
         self.tracker
-            .spawn(scheduler::task(self.shutdown.clone(), board_rx));
+            .spawn(scheduler::task(self.shutdown.clone(), thread_rx));
         self.tracker.close();
 
         info!("Started.");

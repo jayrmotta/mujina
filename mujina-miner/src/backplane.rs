@@ -7,9 +7,10 @@
 
 use crate::board::{Board, BoardDescriptor};
 use crate::error::Result;
+use crate::hash_thread::{HashThread, ThreadRemovalSignal};
 use crate::transport::{TransportEvent, UsbDeviceInfo};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Board registry that uses inventory to find registered boards.
 pub struct BoardRegistry;
@@ -43,18 +44,18 @@ impl BoardRegistry {
 /// manages their lifecycle.
 pub struct Backplane {
     registry: BoardRegistry,
-    #[expect(dead_code, reason = "Will track boards for hotplug removal")]
-    boards: HashMap<String, Box<dyn Board + Send>>,
+    /// Boards with their removal signals for lifecycle management
+    boards: HashMap<String, (Box<dyn Board + Send>, watch::Sender<ThreadRemovalSignal>)>,
     event_rx: mpsc::Receiver<TransportEvent>,
-    /// Channel to send initialized boards to the scheduler
-    scheduler_tx: mpsc::Sender<Box<dyn Board + Send>>,
+    /// Channel to send hash threads to the scheduler
+    scheduler_tx: mpsc::Sender<Vec<Box<dyn HashThread>>>,
 }
 
 impl Backplane {
     /// Create a new backplane.
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
-        scheduler_tx: mpsc::Sender<Box<dyn Board + Send>>,
+        scheduler_tx: mpsc::Sender<Vec<Box<dyn HashThread>>>,
     ) -> Self {
         Self {
             registry: BoardRegistry,
@@ -92,7 +93,7 @@ impl Backplane {
 
                 // Try to create a board from this USB device
                 match self.registry.create_board(device_info).await {
-                    Ok(board) => {
+                    Ok(mut board) => {
                         let board_info = board.board_info();
                         let board_id = board_info
                             .serial_number
@@ -101,11 +102,35 @@ impl Backplane {
 
                         tracing::info!("Created {} board (serial: {})", board_info.model, board_id);
 
-                        // Send to scheduler
-                        if let Err(e) = self.scheduler_tx.send(board).await {
-                            tracing::error!("Failed to send board to scheduler: {}", e);
-                        } else {
-                            tracing::info!("Board {} sent to scheduler", board_id);
+                        // Create hash threads from the board
+                        match board.create_hash_threads().await {
+                            Ok((threads, removal_tx)) => {
+                                tracing::info!(
+                                    "Created {} hash thread(s) from board {}",
+                                    threads.len(),
+                                    board_id
+                                );
+
+                                // Store board with removal signal for lifecycle management
+                                self.boards.insert(board_id.clone(), (board, removal_tx));
+
+                                // Send threads to scheduler
+                                if let Err(e) = self.scheduler_tx.send(threads).await {
+                                    tracing::error!("Failed to send threads to scheduler: {}", e);
+                                } else {
+                                    tracing::info!(
+                                        "Threads from board {} sent to scheduler",
+                                        board_id
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create hash threads from board {}: {}",
+                                    board_id,
+                                    e
+                                );
+                            }
                         }
                     }
                     Err(e) => {
