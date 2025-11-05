@@ -7,10 +7,10 @@
 
 use crate::board::{Board, BoardDescriptor};
 use crate::error::Result;
-use crate::hash_thread::{HashThread, ThreadRemovalSignal};
+use crate::hash_thread::HashThread;
 use crate::transport::{TransportEvent, UsbDeviceInfo};
 use std::collections::HashMap;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 /// Board registry that uses inventory to find registered boards.
 pub struct BoardRegistry;
@@ -44,8 +44,8 @@ impl BoardRegistry {
 /// manages their lifecycle.
 pub struct Backplane {
     registry: BoardRegistry,
-    /// Boards with their removal signals for lifecycle management
-    boards: HashMap<String, (Box<dyn Board + Send>, watch::Sender<ThreadRemovalSignal>)>,
+    /// Active boards managed by the backplane
+    boards: HashMap<String, Box<dyn Board + Send>>,
     event_rx: mpsc::Receiver<TransportEvent>,
     /// Channel to send hash threads to the scheduler
     scheduler_tx: mpsc::Sender<Vec<Box<dyn HashThread>>>,
@@ -104,15 +104,15 @@ impl Backplane {
 
                         // Create hash threads from the board
                         match board.create_hash_threads().await {
-                            Ok((threads, removal_tx)) => {
+                            Ok(threads) => {
                                 tracing::info!(
                                     "Created {} hash thread(s) from board {}",
                                     threads.len(),
                                     board_id
                                 );
 
-                                // Store board with removal signal for lifecycle management
-                                self.boards.insert(board_id.clone(), (board, removal_tx));
+                                // Store board for lifecycle management
+                                self.boards.insert(board_id.clone(), board);
 
                                 // Send threads to scheduler
                                 if let Err(e) = self.scheduler_tx.send(threads).await {
@@ -145,7 +145,22 @@ impl Backplane {
             }
             TransportEvent::UsbDeviceDisconnected { device_path } => {
                 tracing::info!("USB device disconnected: {}", device_path);
-                // TODO: Remove board from active boards and notify scheduler
+
+                // Find and shutdown the board
+                // Note: Current design uses serial number as key, but we get device_path
+                // in disconnect event. For single-board setups this works fine.
+                // TODO: Maintain device_path -> board_id mapping for multi-board support
+                let board_ids: Vec<String> = self.boards.keys().cloned().collect();
+                for board_id in board_ids {
+                    if let Some(mut board) = self.boards.remove(&board_id) {
+                        tracing::info!("Shutting down board {}", board_id);
+                        if let Err(e) = board.shutdown().await {
+                            tracing::error!("Failed to shutdown board {}: {}", board_id, e);
+                        }
+                        // Don't re-insert - board is removed
+                        break; // For now, assume one board per device
+                    }
+                }
             }
         }
 

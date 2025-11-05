@@ -11,16 +11,14 @@ use async_trait::async_trait;
 use futures::sink::Sink;
 use futures::stream::Stream;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use super::{
     HashThread, HashThreadCapabilities, HashThreadError, HashThreadEvent, HashThreadStatus,
-    ThreadId, ThreadRemovalSignal,
 };
 use crate::asic::bm13xx;
+use crate::board::bitaxe::ThreadRemovalSignal;
 use crate::hash_thread::task::HashTask;
 
 /// Command messages sent from scheduler to thread
@@ -55,12 +53,6 @@ enum ThreadCommand {
 /// Represents a chain of BM13xx chips as a schedulable worker. The thread
 /// manages serial communication with chips, filters shares, and reports events.
 pub struct BM13xxThread {
-    /// Unique thread identifier
-    id: ThreadId,
-
-    /// Handle to the internal actor task
-    task_handle: JoinHandle<()>,
-
     /// Channel for sending commands to the actor
     command_tx: mpsc::Sender<ThreadCommand>,
 
@@ -104,7 +96,7 @@ impl BM13xxThread {
         let status_clone = Arc::clone(&status);
 
         // Spawn the actor task (streams moved into task)
-        let task_handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             bm13xx_thread_actor(
                 cmd_rx,
                 evt_tx,
@@ -116,12 +108,7 @@ impl BM13xxThread {
             .await;
         });
 
-        // ThreadId is derived from the task itself
-        let id = ThreadId::from_task(&task_handle);
-
         Self {
-            id,
-            task_handle,
             command_tx: cmd_tx,
             event_rx: Some(evt_rx),
             capabilities: HashThreadCapabilities {
@@ -134,10 +121,6 @@ impl BM13xxThread {
 
 #[async_trait]
 impl HashThread for BM13xxThread {
-    fn id(&self) -> ThreadId {
-        self.id.clone()
-    }
-
     fn capabilities(&self) -> &HashThreadCapabilities {
         &self.capabilities
     }
@@ -199,19 +182,6 @@ impl HashThread for BM13xxThread {
 
     fn status(&self) -> HashThreadStatus {
         self.status.read().unwrap().clone()
-    }
-
-    async fn shutdown(&mut self) -> std::result::Result<(), HashThreadError> {
-        // Send shutdown command
-        self.command_tx.send(ThreadCommand::Shutdown).await.ok();
-
-        // Wait for task to exit (with timeout)
-        tokio::time::timeout(Duration::from_secs(5), &mut self.task_handle)
-            .await
-            .map_err(|_| HashThreadError::ShutdownTimeout)?
-            .map_err(|_| {
-                HashThreadError::WorkAssignmentFailed("task panicked during shutdown".into())
-            })
     }
 }
 
@@ -373,6 +343,7 @@ async fn bm13xx_thread_actor<R, W>(
 mod tests {
     use super::*;
     use futures::stream;
+    use std::time::Duration;
 
     /// Create a mock response stream from a vector of responses
     ///
@@ -404,21 +375,6 @@ mod tests {
 
         // Thread ID is based on task, not a debug name
         assert_eq!(thread.capabilities().hashrate_estimate, 1_000_000_000.0);
-    }
-
-    #[tokio::test]
-    async fn test_thread_id_uniqueness() {
-        let (_tx1, rx1) = watch::channel(ThreadRemovalSignal::Running);
-        let (_tx2, rx2) = watch::channel(ThreadRemovalSignal::Running);
-
-        let thread1 = BM13xxThread::new(mock_response_stream(vec![]), mock_command_sink(), rx1);
-        let thread2 = BM13xxThread::new(mock_response_stream(vec![]), mock_command_sink(), rx2);
-
-        assert_ne!(
-            thread1.id(),
-            thread2.id(),
-            "Different threads should have different IDs"
-        );
     }
 
     #[tokio::test]
@@ -550,20 +506,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shutdown() {
-        let (_removal_tx, removal_rx) = watch::channel(ThreadRemovalSignal::Running);
-        let mut thread = BM13xxThread::new(
-            mock_response_stream(vec![]),
-            mock_command_sink(),
-            removal_rx,
-        );
-
-        let result = thread.shutdown().await;
-
-        assert!(result.is_ok(), "shutdown should succeed");
-    }
-
-    #[tokio::test]
     async fn test_status_updates() {
         let (_removal_tx, removal_rx) = watch::channel(ThreadRemovalSignal::Running);
         let mut thread = BM13xxThread::new(
@@ -627,9 +569,7 @@ mod tests {
 
         // For now, just verify thread doesn't crash when processing nonce
         // TODO: When ShareFound events are implemented, verify event is emitted
-        let status = thread.status();
+        let _status = thread.status();
         // Thread should still be running (not crashed)
-
-        thread.shutdown().await.unwrap();
     }
 }

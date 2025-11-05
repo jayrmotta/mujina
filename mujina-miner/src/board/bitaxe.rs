@@ -18,7 +18,7 @@ use crate::asic::bm13xx::{
 };
 use crate::asic::{ChipInfo, MiningJob};
 use crate::board::{Board, BoardError, BoardEvent, BoardInfo, JobCompleteReason};
-use crate::hash_thread::{HashThread, ThreadRemovalSignal};
+use crate::hash_thread::HashThread;
 use crate::hw_trait::gpio::{Gpio, GpioPin, PinValue};
 use crate::hw_trait::i2c::I2c;
 use crate::mgmt_protocol::bitaxe_raw::i2c::BitaxeRawI2c;
@@ -27,6 +27,32 @@ use crate::peripheral::emc2101::Emc2101;
 use crate::peripheral::tps546::{Tps546, Tps546Config};
 use crate::tracing::prelude::*;
 use crate::transport::serial::{SerialControl, SerialReader, SerialStream, SerialWriter};
+
+/// Thread removal signal sent via watch channel from board to thread.
+///
+/// BitaxeBoard monitors hardware and sends removal signals to BM13xxThread when
+/// shutdown is needed. The signal starts as `Running` and changes to a specific
+/// removal reason when shutdown is triggered.
+///
+/// This is an implementation detail between BitaxeBoard and BM13xxThread, not
+/// part of the HashThread abstraction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ThreadRemovalSignal {
+    /// Thread should continue running normally
+    Running,
+
+    /// Remove: Board was unplugged from USB
+    BoardDisconnected,
+
+    /// Remove: Board detected hardware fault (overheating, power issue, etc.)
+    HardwareFault { description: String },
+
+    /// Remove: User requested board disable via API
+    UserRequested,
+
+    /// Remove: Graceful system shutdown
+    Shutdown,
+}
 
 /// A wrapper around AsyncRead that traces raw bytes as they're read
 struct TracingReader<R> {
@@ -104,6 +130,8 @@ pub struct BitaxeBoard {
     current_job_id: Option<u64>,
     /// Job ID counter for chip-internal job tracking (4-bit field: 0-15)
     next_job_id: u8,
+    /// Thread shutdown signal (board-to-thread implementation detail)
+    thread_shutdown: Option<watch::Sender<ThreadRemovalSignal>>,
     /// Handle for the statistics task
     stats_task_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -165,6 +193,7 @@ impl BitaxeBoard {
             event_rx: None,
             current_job_id: None,
             next_job_id: 0,
+            thread_shutdown: None,
             stats_task_handle: None,
         })
     }
@@ -1188,6 +1217,17 @@ impl Board for BitaxeBoard {
     async fn shutdown(&mut self) -> Result<(), BoardError> {
         tracing::info!("Shutting down Bitaxe board");
 
+        // Signal hash threads to shut down gracefully
+        if let Some(ref tx) = self.thread_shutdown {
+            if let Err(e) = tx.send(ThreadRemovalSignal::Shutdown) {
+                warn!("Failed to send shutdown signal to threads: {}", e);
+            } else {
+                tracing::debug!("Sent shutdown signal to hash threads");
+                // Give threads time to exit gracefully
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+
         // Send chain inactive command to stop all chips from hashing
         let command = Command::ChainInactive;
         self.send_config_command(command).await?;
@@ -1215,11 +1255,12 @@ impl Board for BitaxeBoard {
         Ok(())
     }
 
-    async fn create_hash_threads(
-        &mut self,
-    ) -> Result<(Vec<Box<dyn HashThread>>, watch::Sender<ThreadRemovalSignal>), BoardError> {
+    async fn create_hash_threads(&mut self) -> Result<Vec<Box<dyn HashThread>>, BoardError> {
         // Create removal signal channel (starts as Running)
         let (removal_tx, removal_rx) = watch::channel(ThreadRemovalSignal::Running);
+
+        // Store removal signal sender for later shutdown
+        self.thread_shutdown = Some(removal_tx);
 
         // Take ownership of serial I/O streams
         let data_reader = self
@@ -1242,8 +1283,7 @@ impl Board for BitaxeBoard {
 
         tracing::info!("Created BM13xx hash thread from BitaxeBoard");
 
-        // Return thread and removal signal
-        Ok((vec![Box::new(thread)], removal_tx))
+        Ok(vec![Box::new(thread)])
     }
 }
 
