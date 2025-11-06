@@ -38,16 +38,9 @@ impl Daemon {
 
         // Create and start USB transport discovery
         let usb_transport = UsbTransport::new(transport_tx.clone());
-        self.tracker.spawn({
-            let shutdown = self.shutdown.clone();
-            async move {
-                if let Err(e) = usb_transport.start_discovery().await {
-                    error!("USB discovery failed: {}", e);
-                }
-                // Keep the transport task alive until shutdown
-                shutdown.cancelled().await;
-            }
-        });
+        if let Err(e) = usb_transport.start_discovery(self.shutdown.clone()).await {
+            error!("Failed to start USB discovery: {}", e);
+        }
 
         // Create and start backplane
         let mut backplane = Backplane::new(transport_rx, thread_tx);

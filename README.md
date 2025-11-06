@@ -52,6 +52,24 @@ Planned support:
 - Antminer hash boards
 - Other ASIC mining hardware
 
+## Build Requirements
+
+### Development Dependencies (Linux)
+
+On Debian/Ubuntu systems:
+
+```bash
+sudo apt-get install libudev-dev
+```
+
+The `libudev-dev` package provides header files and development libraries
+required for USB device discovery during compilation.
+
+### macOS
+
+macOS support is planned but not yet implemented. USB discovery will use the
+IOKit framework when available.
+
 ## Building
 
 ```bash
@@ -119,6 +137,7 @@ consistency between analysis and runtime behavior.
 ## Development Status
 
 This is an active development project. Current focus areas:
+- [x] USB device discovery and hotplug monitoring
 - [x] Basic board initialization and chip discovery
 - [x] GPIO control for ASIC reset
 - [x] I2C peripheral control implementation

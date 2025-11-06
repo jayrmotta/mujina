@@ -141,12 +141,19 @@ testability.
 
 #### `transport/`
 Physical connections to hash boards. This layer handles:
-- USB device discovery and enumeration
-- Hotplug detection and events
+- USB device discovery and enumeration via libudev (Linux)
+- Real-time hotplug detection and events
 - Opening and configuring serial ports
 - Managing dual-channel devices (management + data channels)
 - No protocol knowledge - just raw byte streams
 - Emits `BoardConnected`/`BoardDisconnected` events
+
+Platform support:
+- **Linux**: Uses libudev for USB device discovery and monitoring
+- **macOS**: Planned (will use IOKit framework)
+
+The transport layer discovers devices based on VID/PID and associated serial
+ports, then emits events to the backplane for board initialization.
 
 #### `mgmt_protocol/`
 Protocol implementations for hash board management. This layer:

@@ -3,10 +3,16 @@
 //! This module handles USB device discovery and hotplug events.
 //! It provides raw device information without any knowledge of
 //! what the devices are or how they should be configured.
+//!
+//! ## Platform Support
+//!
+//! - **Linux**: Uses udev for device enumeration and hotplug monitoring
+//! - **macOS**: Stub implementation (IOKit support planned for future)
 
 use crate::error::Result;
 use crate::tracing::prelude::*;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Information about a discovered USB device.
 #[derive(Debug, Clone)]
@@ -46,53 +52,117 @@ impl UsbTransport {
         Self { event_tx }
     }
 
-    /// Start discovery task.
+    /// Start discovery and monitoring.
     ///
-    /// For now, this immediately "discovers" hardcoded devices.
-    /// In the future, this will monitor udev events for USB hotplug.
-    pub async fn start_discovery(&self) -> Result<()> {
-        info!("Starting USB discovery (hardcoded for now)");
+    /// Spawns a dedicated thread to monitor USB devices using the synchronous
+    /// udev API. Returns immediately after spawning the thread.
+    ///
+    /// # Architecture
+    ///
+    /// USB monitoring runs in a dedicated OS thread rather than an async task
+    /// because the underlying udev C library provides no thread-safety guarantees.
+    /// The udev types contain raw C pointers that are !Send, meaning they cannot
+    /// safely cross thread boundaries. By running the monitor in a dedicated
+    /// thread, we:
+    ///
+    /// 1. Keep udev objects confined to a single OS thread (as libudev requires)
+    /// 2. Use the simpler synchronous udev API (no async overhead)
+    /// 3. Extract device info into Send types before sending via channels
+    /// 4. Allow the main async runtime to spawn this without Send constraints
+    ///
+    /// The thread monitors the udev socket (a file descriptor) using blocking I/O,
+    /// which is efficient for infrequent hotplug events. The overhead of one
+    /// dedicated thread is negligible compared to the complexity of trying to
+    /// make udev work with Tokio's multi-threaded work-stealing scheduler.
+    ///
+    /// # Shutdown
+    ///
+    /// The monitoring thread checks the provided `CancellationToken` and exits
+    /// gracefully when cancellation is requested.
+    pub async fn start_discovery(&self, shutdown: CancellationToken) -> Result<()> {
+        info!("Starting USB discovery");
 
-        // Hardcoded discovery - simulating what real USB enumeration would find
-        let device = UsbDeviceInfo {
-            vid: 0x0403,
-            pid: 0x6015, // Matches Bitaxe Gamma registration
-            serial_number: Some("BITAXE001".to_string()),
-            device_path: "/sys/bus/usb/devices/1-1.2".to_string(),
-            serial_ports: vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM1".to_string()],
-        };
+        // Create platform-specific discovery implementation
+        let discovery = create_discovery()?;
 
-        info!(
-            "Discovered USB device: {:04x}:{:04x} with {} serial ports",
-            device.vid,
-            device.pid,
-            device.serial_ports.len()
-        );
+        // Clone the event sender for the monitoring thread
+        let event_tx = self.event_tx.clone();
 
-        // Emit discovery event wrapped in generic transport event
-        let usb_event = TransportEvent::UsbDeviceConnected(device);
-        let event = super::TransportEvent::Usb(usb_event);
+        // Spawn dedicated monitoring thread
+        std::thread::Builder::new()
+            .name("usb-monitor".to_string())
+            .spawn(move || {
+                if let Err(e) = discovery.monitor_blocking(event_tx, shutdown) {
+                    error!("USB monitoring failed: {}", e);
+                }
+                info!("USB monitoring thread exiting");
+            })
+            .map_err(|e| {
+                crate::error::Error::Other(format!("Failed to spawn USB monitor thread: {}", e))
+            })?;
 
-        if let Err(e) = self.event_tx.send(event).await {
-            error!("Failed to send transport event: {}", e);
-        }
-
+        info!("USB discovery thread spawned");
         Ok(())
     }
 }
 
-// Future enhancement: Real USB device enumeration
-//
-// The discovery process would:
-// 1. Monitor udev events for USB device add/remove
-// 2. When a device is added, read its descriptors (VID, PID, serial)
-// 3. Enumerate child devices to find serial ports, HID interfaces, etc.
-// 4. Build a UsbDeviceInfo with all discovered information
-// 5. Send a UsbDeviceConnected event
-//
-// The transport layer doesn't know or care:
-// - What baud rate to use for serial ports
-// - Which port is for control vs data
-// - Whether this is even a mining board
-//
-// That knowledge belongs in the board implementations.
+// Platform-specific implementations
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Internal trait for platform-specific USB discovery implementations.
+///
+/// This trait is not exposed publicly - only `UsbTransport` uses it internally.
+///
+/// Implementations run in a dedicated std::thread to avoid Send issues with
+/// udev's raw C pointers. The synchronous API is used since USB hotplug events
+/// are infrequent and don't benefit from async overhead.
+trait UsbDiscoveryImpl: Send + Sync {
+    /// Monitor for USB device add/remove events (blocking).
+    ///
+    /// This method runs in a dedicated thread and blocks until an error occurs,
+    /// the channel is closed, or shutdown is requested. It sends TransportEvent
+    /// messages through the provided channel as devices are connected or
+    /// disconnected.
+    ///
+    /// # Implementation Requirements
+    ///
+    /// 1. Perform initial enumeration and send Connected events for existing devices
+    /// 2. Enter blocking monitoring loop for hotplug events
+    /// 3. Check shutdown token periodically (at least on each event)
+    /// 4. Exit gracefully on shutdown, channel closure, or fatal error
+    ///
+    /// # Parameters
+    ///
+    /// * `event_tx` - Channel for sending transport events (use `blocking_send`)
+    /// * `shutdown` - Token to signal shutdown (check `is_cancelled()`)
+    fn monitor_blocking(
+        self: Box<Self>,
+        event_tx: mpsc::Sender<super::TransportEvent>,
+        shutdown: CancellationToken,
+    ) -> Result<()>;
+}
+
+/// Create a platform-specific USB discovery implementation.
+///
+/// Returns a boxed trait object that implements USB discovery for the
+/// current platform.
+fn create_discovery() -> Result<Box<dyn UsbDiscoveryImpl>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(linux::LinuxUdevDiscovery::new()?))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(macos::MacOsIoKitDiscovery::new()?))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        compile_error!("USB discovery is not implemented for this platform");
+    }
+}
