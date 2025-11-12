@@ -42,6 +42,22 @@ impl JobTemplate {
     pub fn target(&self) -> Target {
         Target::from(self.bits)
     }
+
+    /// Compute merkle root for the given extranonce2.
+    ///
+    /// Returns an error if this is a fixed merkle root (header-only job)
+    /// or if merkle computation fails.
+    pub fn compute_merkle_root(
+        &self,
+        en2: &Extranonce2,
+    ) -> anyhow::Result<bitcoin::hash_types::TxMerkleNode> {
+        match &self.merkle_root {
+            MerkleRootKind::Computed(template) => template.compute_merkle_root(en2),
+            MerkleRootKind::Fixed(_) => {
+                anyhow::bail!("Cannot compute merkle root for header-only job")
+            }
+        }
+    }
 }
 
 /// Represents a share submission (solved work).
