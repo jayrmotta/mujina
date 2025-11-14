@@ -10,7 +10,7 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use bitcoin::block::{Header as BlockHeader, Version};
+use bitcoin::block::Header as BlockHeader;
 use futures::{sink::Sink, stream::Stream, SinkExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_stream::StreamExt;
@@ -617,7 +617,7 @@ fn task_to_job_full(
         ntime: task.ntime,
         merkle_root,
         prev_block_hash: template.prev_blockhash,
-        version: template.version.version,
+        version: template.version.base,
     })
 }
 
@@ -872,10 +872,8 @@ async fn bm13xx_thread_actor<R, W>(
                                 if let Some(task) = chip_jobs.get(job_id) {
                                     let template = &task.job.template;
 
-                                    // Reconstruct full version (chip returns version bits to shift left 13)
-                                    let base_version = template.version.version.to_consensus();
-                                    let full_version =
-                                        Version::from_consensus(base_version | ((version as i32) << 13));
+                                    // Reconstruct full version from rolling field
+                                    let full_version = version.apply_to_version(template.version.base);
 
                                     // Compute merkle root for this task's EN2
                                     match task.en2.as_ref().and_then(|en2| template.compute_merkle_root(en2).ok()) {
@@ -1094,7 +1092,7 @@ mod tests {
             id: "test".into(),
             prev_blockhash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
             version: VersionTemplate {
-                version: *esp_miner_job::wire_tx::VERSION,
+                base: *esp_miner_job::wire_tx::VERSION,
                 mask: Some(0xFFFF0000),
             },
             bits: *esp_miner_job::wire_tx::NBITS,

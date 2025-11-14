@@ -17,8 +17,8 @@ use bitcoin::block::Version;
 /// "must be preserved". If no mask is provided, version rolling is disabled.
 #[derive(Debug, Clone)]
 pub struct VersionTemplate {
-    /// Block version number and soft-fork signaling field.
-    pub version: Version,
+    /// Base block version number (before rolling).
+    pub base: Version,
 
     /// Bitmask indicating which version bits may be rolled.
     ///

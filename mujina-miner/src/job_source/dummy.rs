@@ -75,7 +75,7 @@ impl DummySource {
             // Start with the exact winning version, allow rolling top 10 bits
             // (BM1370 capability per register 0xA4 documentation)
             version: VersionTemplate {
-                version: *block_881423::VERSION,
+                base: *block_881423::VERSION,
                 mask: Some(0x3ff0_0000), // Top 10 bits rollable
             },
 
