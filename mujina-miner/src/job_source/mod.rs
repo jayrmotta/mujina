@@ -53,7 +53,7 @@ pub use extranonce2::{Extranonce2, Extranonce2Error, Extranonce2Iter, Extranonce
 pub use job::{JobTemplate, Share};
 pub use merkle::{MerkleRootKind, MerkleRootTemplate};
 pub use messages::{SourceCommand, SourceEvent, SourceHandle};
-pub use version::VersionTemplate;
+pub use version::{GeneralPurposeBits, VersionTemplate, VersionTemplateError};
 
 // TODO: Add HeaderTemplate type (Level 2 in the hierarchy)
 // TODO: Implement dummy source

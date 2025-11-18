@@ -7,6 +7,7 @@
 //! of the complete mining stack.
 
 use anyhow::Result;
+use bitcoin::block::Version;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -14,8 +15,8 @@ use tracing::{debug, info};
 
 use super::test_blocks::block_881423;
 use super::{
-    job, Extranonce2Range, JobTemplate, MerkleRootKind, MerkleRootTemplate, SourceCommand,
-    SourceEvent, VersionTemplate,
+    job, Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate,
+    SourceCommand, SourceEvent, VersionTemplate,
 };
 
 /// Dummy job source that generates work from test block data.
@@ -68,17 +69,19 @@ impl DummySource {
         // Get merkle branches as typed TxMerkleNode
         let merkle_branches = block_881423::MERKLE_BRANCHES.clone();
 
+        // Use block_881423 version with GP bits (13-28) masked away
+        let v = block_881423::VERSION.to_consensus() as u32;
+        let base_cleaned = (v & !0x1fff_e000) as i32;
+        let version = VersionTemplate::new(
+            Version::from_consensus(base_cleaned),
+            GeneralPurposeBits::full(),
+        )
+        .expect("Masked version has no GP bits set");
+
         let job_template = JobTemplate {
             id: "dummy-0".into(),
             prev_blockhash: *block_881423::PREV_BLOCKHASH,
-
-            // Start with the exact winning version, allow rolling top 10 bits
-            // (BM1370 capability per register 0xA4 documentation)
-            version: VersionTemplate {
-                base: *block_881423::VERSION,
-                mask: Some(0x3ff0_0000), // Top 10 bits rollable
-            },
-
+            version,
             bits: *block_881423::BITS,
 
             // Share difficulty: ~1 share per 10 seconds at 1 TH/s

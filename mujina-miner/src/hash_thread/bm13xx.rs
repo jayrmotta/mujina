@@ -617,7 +617,7 @@ fn task_to_job_full(
         ntime: task.ntime,
         merkle_root,
         prev_block_hash: template.prev_blockhash,
-        version: template.version.base,
+        version: template.version.base(),
     })
 }
 
@@ -873,7 +873,7 @@ async fn bm13xx_thread_actor<R, W>(
                                     let template = &task.job.template;
 
                                     // Reconstruct full version from rolling field
-                                    let full_version = version.apply_to_version(template.version.base);
+                                    let full_version = version.apply_to_version(template.version.base());
 
                                     // Compute merkle root for this task's EN2
                                     match task.en2.as_ref().and_then(|en2| template.compute_merkle_root(en2).ok()) {
@@ -990,7 +990,9 @@ mod tests {
     #[test]
     fn test_task_to_job_full_converts_high_level_types() {
         use crate::asic::bm13xx::test_data::esp_miner_job;
-        use crate::job_source::{Extranonce2, JobTemplate, MerkleRootKind, VersionTemplate};
+        use crate::job_source::{
+            Extranonce2, GeneralPurposeBits, JobTemplate, MerkleRootKind, VersionTemplate,
+        };
         use crate::scheduler::ActiveJob;
 
         // Create a JobTemplate with test data values
@@ -998,10 +1000,11 @@ mod tests {
         let template = JobTemplate {
             id: "test".into(),
             prev_blockhash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
-            version: VersionTemplate {
-                base: *esp_miner_job::wire_tx::VERSION,
-                mask: Some(0xFFFF0000),
-            },
+            version: VersionTemplate::new(
+                *esp_miner_job::wire_tx::VERSION,
+                GeneralPurposeBits::full(),
+            )
+            .expect("Valid version template"),
             bits: *esp_miner_job::wire_tx::NBITS,
             share_target: crate::job_source::job::difficulty_to_target(100),
             time: *esp_miner_job::wire_tx::NTIME,
