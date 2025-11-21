@@ -44,10 +44,12 @@ pub mod protocol {
         pub const FAN_CONFIG: u8 = 0x4A;
         /// Fan spin-up configuration
         pub const FAN_SPINUP: u8 = 0x4B;
+        /// Fan setting register (PWM duty cycle)
+        pub const FAN_SETTING: u8 = 0x4C;
         /// PWM frequency register
-        pub const PWM_FREQ: u8 = 0x4C;
+        pub const PWM_FREQ: u8 = 0x4D;
         /// PWM frequency divide register
-        pub const PWM_DIV: u8 = 0x4D;
+        pub const PWM_DIV: u8 = 0x4E;
         /// Fan minimum drive register
         pub const FAN_MIN_DRIVE: u8 = 0x55;
         /// Fan valid TACH count
@@ -64,8 +66,6 @@ pub mod protocol {
         pub const TACH_LIMIT_HIGH: u8 = 0x48;
         /// TACH limit low byte
         pub const TACH_LIMIT_LOW: u8 = 0x49;
-        /// Fan setting register (PWM duty cycle)
-        pub const FAN_SETTING: u8 = 0x4C;
         /// Product ID register
         pub const PRODUCT_ID: u8 = 0xFD;
         /// Manufacturer ID register
@@ -88,7 +88,8 @@ pub mod protocol {
             0x4A => "FAN_CONFIG".to_string(),
             0x4B => "FAN_SPINUP".to_string(),
             0x4C => "FAN_SETTING".to_string(),
-            0x4D => "PWM_DIV".to_string(),
+            0x4D => "PWM_FREQ".to_string(),
+            0x4E => "PWM_DIV".to_string(),
             0x55 => "FAN_MIN_DRIVE".to_string(),
             0x58 => "FAN_VALID_TACH".to_string(),
             0x5A => "FAN_FAIL_BAND_LOW".to_string(),
@@ -253,34 +254,28 @@ impl<I: I2c> Emc2101<I> {
 
         // Configure for PWM control mode
         // Enable PWM, disable RPM mode
+        // Bits 1:0 control PWM frequency: 11 = ~22.5kHz (as used by esp-miner)
         const FAN_CONFIG_PWM_MODE: u8 = 0x23;
         self.write_register(regs::FAN_CONFIG, FAN_CONFIG_PWM_MODE)
-            .await?;
-
-        // Set PWM frequency to ~25kHz (standard for 4-wire PWM fans)
-        // PWM_FREQ=0x1F (31) gives ~25kHz with 360kHz base clock
-        const PWM_FREQ_25KHZ: u8 = 0x1F;
-        const PWM_DIV_NO_DIVIDE: u8 = 0x01;
-        self.write_register(regs::PWM_FREQ, PWM_FREQ_25KHZ).await?;
-        self.write_register(regs::PWM_DIV, PWM_DIV_NO_DIVIDE)
             .await?;
 
         Ok(())
     }
 
-    /// Set fan PWM duty cycle (0-255, where 255 = 100%)
+    /// Set fan PWM duty cycle (0-63, where 63 = 100%)
+    /// The EMC2101 FAN_SETTING register uses a 6-bit value (0-63)
     pub async fn set_pwm_duty(&mut self, duty: u8) -> Result<()> {
         self.write_register(regs::FAN_SETTING, duty).await
     }
 
-    /// Get current PWM duty cycle
+    /// Get current PWM duty cycle (0-63)
     pub async fn get_pwm_duty(&mut self) -> Result<u8> {
         self.read_register(regs::FAN_SETTING).await
     }
 
     /// Set fan PWM duty cycle as percentage (0-100)
     pub async fn set_pwm_percent(&mut self, percent: u8) -> Result<()> {
-        const PWM_MAX: u8 = 255;
+        const PWM_MAX: u8 = 63; // EMC2101 uses 6-bit PWM (0-63)
         let duty = if percent >= 100 {
             PWM_MAX
         } else {
@@ -291,7 +286,7 @@ impl<I: I2c> Emc2101<I> {
 
     /// Get fan PWM duty cycle as percentage (0-100)
     pub async fn get_pwm_percent(&mut self) -> Result<u8> {
-        const PWM_MAX: u8 = 255;
+        const PWM_MAX: u8 = 63; // EMC2101 uses 6-bit PWM (0-63)
         let duty = self.get_pwm_duty().await?;
         Ok(((duty as u16 * 100) / PWM_MAX as u16) as u8)
     }
