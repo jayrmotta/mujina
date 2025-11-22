@@ -724,6 +724,7 @@ impl StratumV1Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job_source::Extranonce2;
     use bitcoin::hashes::Hash;
     use tokio::time::{timeout, Duration};
 
@@ -777,6 +778,7 @@ mod tests {
     /// See [`test_integration_public_pool`] for running instructions.
     #[tokio::test]
     #[ignore]
+    #[should_panic(expected = "Pool disconnected too shortly after subscribing")]
     async fn test_integration_ocean() {
         test_pool_integration(
             "mine.ocean.xyz:3334",
@@ -830,6 +832,22 @@ mod tests {
     }
 
     /// Common integration test logic for pool connections.
+    ///
+    /// # Test Strategy
+    ///
+    /// This test validates that the client can successfully connect to a pool and
+    /// maintain a stable connection through the complete handshake sequence:
+    ///
+    /// 1. **Connect**: Establish TCP connection and spawn client task
+    /// 2. **Collect events**: Wait for subscription, job, and difficulty events
+    /// 3. **Stability check**: Wait 5 seconds to ensure pool doesn't disconnect
+    ///
+    /// The stability check (phase 3) was added after discovering that Ocean pool
+    /// silently disconnects clients that suggest a difficulty lower than their
+    /// minimum (in our case, suggested_difficulty=4096). Without this check, the
+    /// test would pass on Ocean because it sends initial events before disconnecting.
+    /// The 5-second stability period catches pools that reject our configuration
+    /// with a delayed disconnect.
     async fn test_pool_integration(pool_url: &str, username: &str) {
         use tracing_subscriber::{fmt, EnvFilter};
 
@@ -855,101 +873,134 @@ mod tests {
 
         let client = StratumV1Client::new(config, event_tx, shutdown.clone());
 
-        // Spawn client
+        // Phase 1: Connect to pool
         let client_handle = tokio::spawn(async move { client.run().await });
 
-        // Collect events with timeout
+        // Helper to handle and print events
+        let handle_event = |event: &ClientEvent,
+                            subscribed: &mut bool,
+                            received_job: &mut bool,
+                            received_difficulty: &mut bool| {
+            match event {
+                ClientEvent::VersionRollingConfigured { authorized_mask } => {
+                    println!("\n[Version Rolling]");
+                    if let Some(mask) = authorized_mask {
+                        println!("  Authorized mask: {:#010x}", mask);
+                    } else {
+                        println!("  Not supported");
+                    }
+                }
+                ClientEvent::Subscribed {
+                    extranonce1,
+                    extranonce2_size,
+                } => {
+                    println!("\n[Subscribed]");
+                    println!("  Extranonce1: {}", hex::encode(&extranonce1));
+                    println!("  Extranonce2 size: {} bytes", extranonce2_size);
+                    assert!(!extranonce1.is_empty(), "extranonce1 should not be empty");
+                    assert!(
+                        Extranonce2::new(0, *extranonce2_size as u8).is_ok(),
+                        "pool returned invalid extranonce2_size: {}",
+                        extranonce2_size
+                    );
+                    *subscribed = true;
+                }
+                ClientEvent::NewJob(job) => {
+                    println!("\n[New Job]");
+                    println!("  Job ID: {}", job.job_id);
+                    println!("  Previous hash: {}", job.prev_hash);
+                    println!("  Version: {:#010x}", job.version.to_consensus());
+                    println!("  Nbits: {:#010x}", job.nbits.to_consensus());
+                    println!("  Ntime: {} ({})", job.ntime, job.ntime);
+                    println!("  Merkle branches: {}", job.merkle_branches.len());
+                    println!("  Coinbase1 size: {} bytes", job.coinbase1.len());
+                    println!("  Coinbase2 size: {} bytes", job.coinbase2.len());
+                    println!("  Clean jobs: {}", job.clean_jobs);
+                    assert!(!job.job_id.is_empty(), "job_id should not be empty");
+                    assert_eq!(
+                        job.prev_hash.as_byte_array().len(),
+                        32,
+                        "prev_hash should be 32 bytes"
+                    );
+                    assert!(!job.coinbase1.is_empty(), "coinbase1 should not be empty");
+                    assert!(!job.coinbase2.is_empty(), "coinbase2 should not be empty");
+                    *received_job = true;
+                }
+                ClientEvent::DifficultyChanged(diff) => {
+                    println!("\n[Difficulty Changed]");
+                    println!("  Difficulty: {}", diff);
+                    assert!(*diff > 0, "difficulty should be positive");
+                    *received_difficulty = true;
+                }
+                ClientEvent::VersionMaskSet(mask) => {
+                    println!("\n[Version Mask Set]");
+                    println!("  Mask: {:#010x}", mask);
+                }
+                ClientEvent::Error(err) => {
+                    println!("\n[Error] {}", err);
+                }
+                _ => {}
+            }
+        };
+
+        // Phase 2: Collect required events from the pool
         let mut subscribed = false;
         let mut received_job = false;
         let mut received_difficulty = false;
 
-        let result = timeout(Duration::from_secs(30), async {
+        let result = timeout(Duration::from_secs(10), async {
             loop {
                 match event_rx.recv().await {
+                    Some(ClientEvent::Disconnected) => {
+                        println!("\n[Disconnected]");
+                        panic!("Pool disconnected before receiving all required events");
+                    }
                     Some(event) => {
-                        match event {
-                            ClientEvent::VersionRollingConfigured { authorized_mask } => {
-                                println!("\n[Version Rolling]");
-                                if let Some(mask) = authorized_mask {
-                                    println!("  Authorized mask: {:#010x}", mask);
-                                } else {
-                                    println!("  Not supported");
-                                }
-                            }
-
-                            ClientEvent::Subscribed {
-                                extranonce1,
-                                extranonce2_size,
-                            } => {
-                                println!("\n[Subscribed]");
-                                println!("  Extranonce1: {}", hex::encode(&extranonce1));
-                                println!("  Extranonce2 size: {} bytes", extranonce2_size);
-                                assert!(!extranonce1.is_empty(), "extranonce1 should not be empty");
-                                assert!(
-                                    extranonce2_size >= 4 && extranonce2_size <= 8,
-                                    "extranonce2_size should be 4-8 bytes"
-                                );
-                                subscribed = true;
-                            }
-
-                            ClientEvent::NewJob(job) => {
-                                println!("\n[New Job]");
-                                println!("  Job ID: {}", job.job_id);
-                                println!("  Previous hash: {}", job.prev_hash);
-                                println!("  Version: {:#010x}", job.version.to_consensus());
-                                println!("  Nbits: {:#010x}", job.nbits.to_consensus());
-                                println!("  Ntime: {} ({})", job.ntime, job.ntime);
-                                println!("  Merkle branches: {}", job.merkle_branches.len());
-                                println!("  Coinbase1 size: {} bytes", job.coinbase1.len());
-                                println!("  Coinbase2 size: {} bytes", job.coinbase2.len());
-                                println!("  Clean jobs: {}", job.clean_jobs);
-
-                                assert!(!job.job_id.is_empty(), "job_id should not be empty");
-                                assert_eq!(
-                                    job.prev_hash.as_byte_array().len(),
-                                    32,
-                                    "prev_hash should be 32 bytes"
-                                );
-                                assert!(!job.coinbase1.is_empty(), "coinbase1 should not be empty");
-                                assert!(!job.coinbase2.is_empty(), "coinbase2 should not be empty");
-                                received_job = true;
-                            }
-
-                            ClientEvent::DifficultyChanged(diff) => {
-                                println!("\n[Difficulty Changed]");
-                                println!("  Difficulty: {}", diff);
-                                assert!(diff > 0, "difficulty should be positive");
-                                received_difficulty = true;
-                            }
-
-                            ClientEvent::VersionMaskSet(mask) => {
-                                println!("\n[Version Mask Set]");
-                                println!("  Mask: {:#010x}", mask);
-                            }
-
-                            ClientEvent::Disconnected => {
-                                println!("\n[Disconnected]");
-                                break;
-                            }
-
-                            ClientEvent::Error(err) => {
-                                println!("\n[Error] {}", err);
-                            }
-
-                            _ => {}
-                        }
-
-                        // Once we have all the events we're looking for, disconnect
+                        handle_event(
+                            &event,
+                            &mut subscribed,
+                            &mut received_job,
+                            &mut received_difficulty,
+                        );
                         if subscribed && received_job && received_difficulty {
-                            println!("\n=== All expected events received, disconnecting ===");
                             break;
                         }
                     }
-                    None => {
-                        println!("Event channel closed - client task ended");
-                        break;
+                    None => panic!("Event channel closed before receiving all required events"),
+                }
+            }
+
+            // Phase 3: Stability check - wait 5 seconds to ensure pool doesn't disconnect
+            println!("\n=== All expected events received, waiting for connection stability ===");
+            let stability_check = timeout(Duration::from_secs(5), async {
+                loop {
+                    match event_rx.recv().await {
+                        Some(ClientEvent::Disconnected) => {
+                            println!("\n[Disconnected]");
+                            return Err("disconnected");
+                        }
+                        Some(event) => {
+                            handle_event(
+                                &event,
+                                &mut subscribed,
+                                &mut received_job,
+                                &mut received_difficulty,
+                            );
+                        }
+                        None => return Err("channel closed"),
                     }
                 }
+            })
+            .await;
+
+            match stability_check {
+                Err(_elapsed) => {
+                    // Timeout is success - connection stayed stable for 5 seconds
+                    println!("\n=== Connection stable for 5 seconds, test passed ===");
+                    Ok(())
+                }
+                Ok(Err(reason)) => Err(reason),
+                Ok(Ok(())) => unreachable!("stability loop never returns Ok"),
             }
         })
         .await;
@@ -958,11 +1009,12 @@ mod tests {
         shutdown.cancel();
         let _ = client_handle.await;
 
-        // Verify we got events
+        // Verify test passed
         assert!(result.is_ok(), "Test timed out waiting for pool events");
-        assert!(subscribed, "Should have received subscription");
-        assert!(received_job, "Should have received at least one job");
-        assert!(received_difficulty, "Should have received difficulty");
+        assert!(
+            result.unwrap().is_ok(),
+            "Pool disconnected too shortly after subscribing"
+        );
 
         println!("\n=== Test complete ===");
     }
