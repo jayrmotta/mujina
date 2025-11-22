@@ -436,7 +436,7 @@ impl BitaxeBoard {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                 // Set initial output voltage, default for BM1370 from esp-miner
-                const DEFAULT_VOUT: f32 = 1.2;
+                const DEFAULT_VOUT: f32 = 1.15;
                 match tps546.set_vout(DEFAULT_VOUT).await {
                     Ok(()) => {
                         debug!("Core voltage set to {DEFAULT_VOUT}V");
