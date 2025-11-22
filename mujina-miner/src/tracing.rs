@@ -24,6 +24,12 @@ use tracing_subscriber::{
     registry::LookupSpan,
 };
 
+#[cfg(target_os = "linux")]
+use std::{io, os::unix::io::AsRawFd};
+
+#[cfg(target_os = "linux")]
+use nix::libc;
+
 pub mod prelude {
     #[allow(unused_imports)]
     pub use tracing::{debug, error, info, trace, warn};
@@ -31,21 +37,66 @@ pub mod prelude {
 
 use prelude::*;
 
+/// Check if stderr is connected to systemd journal by validating JOURNAL_STREAM.
+///
+/// Per systemd documentation, programs should parse the device and inode numbers
+/// from JOURNAL_STREAM and compare them against stderr's file descriptor to
+/// detect I/O redirection and ensure the connection is genuine.
+///
+/// See: https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#%24JOURNAL_STREAM
+#[cfg(target_os = "linux")]
+fn stderr_is_journal_stream() -> bool {
+    let journal_stream = match env::var("JOURNAL_STREAM") {
+        Ok(val) => val,
+        Err(_) => return false,
+    };
+
+    // Parse "device:inode" format
+    let parts: Vec<&str> = journal_stream.split(':').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    let expected_dev: u64 = match parts[0].parse() {
+        Ok(dev) => dev,
+        Err(_) => return false,
+    };
+
+    let expected_ino: u64 = match parts[1].parse() {
+        Ok(ino) => ino,
+        Err(_) => return false,
+    };
+
+    // Get actual device and inode from stderr
+    let stderr = io::stderr();
+    let fd = stderr.as_raw_fd();
+
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return false;
+    }
+
+    stat.st_dev == expected_dev && stat.st_ino == expected_ino
+}
+
 /// Initialize logging.
 ///
 /// If running under systemd, use journald; otherwise fall
 /// back to stdout.
 pub fn init_journald_or_stdout() {
-    if env::var("JOURNAL_STREAM").is_ok() {
-        if let Ok(layer) = tracing_journald::layer() {
-            tracing_subscriber::registry().with(layer).init();
-        } else {
-            use_stdout();
-            error!("Failed to initialize journald logging, using stdout.");
+    #[cfg(target_os = "linux")]
+    {
+        if stderr_is_journal_stream() {
+            if let Ok(layer) = tracing_journald::layer() {
+                tracing_subscriber::registry().with(layer).init();
+                return;
+            } else {
+                error!("Failed to initialize journald logging, using stdout.");
+            }
         }
-    } else {
-        use_stdout();
     }
+
+    use_stdout();
 }
 
 // Log to stdout, filtering according to environment variable RUST_LOG,
