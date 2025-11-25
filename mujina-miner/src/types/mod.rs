@@ -134,6 +134,18 @@ pub fn expected_time_to_share(difficulty: Difficulty, hashrate: HashRate) -> Dur
     Duration::from_secs_f64(1.0 / shares_per_sec)
 }
 
+/// Calculate difficulty to achieve approximately one share per `interval`.
+///
+/// This is the inverse of `expected_time_to_share`. Useful for setting pool
+/// difficulty based on hashrate and desired share frequency.
+///
+/// Formula: difficulty = hashrate * interval / 2^32
+pub fn difficulty_for_share_interval(interval: Duration, hashrate: HashRate) -> Difficulty {
+    let hashes_in_interval = f64::from(hashrate) * interval.as_secs_f64();
+    let difficulty = hashes_in_interval / (u32::MAX as f64 + 1.0);
+    Difficulty::new(difficulty.max(1.0) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +215,23 @@ mod tests {
         let shares_per_sec = expected_shares_per_second(diff, hashrate);
         // Should be roughly 0.23 shares per second
         assert!((shares_per_sec - 0.233).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_difficulty_for_share_interval() {
+        // 1 TH/s with 10 second target = ~2328 difficulty
+        let hashrate = HashRate::from_terahashes(1.0);
+        let interval = Duration::from_secs(10);
+        let diff = difficulty_for_share_interval(interval, hashrate);
+        // 1e12 * 10 / 2^32 ≈ 2328
+        assert!((u64::from(diff) as i64 - 2328).abs() < 10);
+
+        // Round-trip: difficulty -> interval -> difficulty should be close
+        let original = Difficulty::new(1024);
+        let hashrate = HashRate::from_gigahashes(1.0);
+        let interval = expected_time_to_share(original, hashrate);
+        let recovered = difficulty_for_share_interval(interval, hashrate);
+        assert!((u64::from(recovered) as i64 - 1024).abs() < 2);
     }
 }
 

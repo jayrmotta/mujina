@@ -10,10 +10,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::stratum_v1::{ClientEvent, JobNotification, PoolConfig};
+use crate::types::Difficulty;
 
 use super::{
-    job, Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate,
-    Share, SourceCommand, SourceEvent, VersionTemplate,
+    Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate, Share,
+    SourceCommand, SourceEvent, VersionTemplate,
 };
 
 /// Stratum v1 job source.
@@ -51,7 +52,7 @@ struct ProtocolState {
     extranonce2_size: usize,
 
     /// Current share difficulty (from mining.set_difficulty)
-    share_difficulty: Option<u64>,
+    share_difficulty: Option<Difficulty>,
 
     /// Authorized version mask (from mining.configure or mining.set_version_mask)
     version_mask: Option<u32>,
@@ -96,8 +97,8 @@ impl StratumV1Source {
 
         // Convert share difficulty to target
         // Default to difficulty 1 if not yet set by pool
-        let share_difficulty = state.share_difficulty.unwrap_or(1);
-        let share_target = job::difficulty_to_target(share_difficulty);
+        let share_difficulty = state.share_difficulty.unwrap_or(Difficulty::new(1));
+        let share_target = share_difficulty.to_target();
 
         Ok(JobTemplate {
             id: job.job_id,
@@ -185,9 +186,10 @@ impl StratumV1Source {
             }
 
             ClientEvent::DifficultyChanged(diff) => {
-                debug!(difficulty = diff, "Pool difficulty changed");
+                let difficulty = Difficulty::new(diff);
+                debug!(difficulty = %difficulty, "Pool difficulty changed");
                 if let Some(state) = &mut self.state {
-                    state.share_difficulty = Some(diff);
+                    state.share_difficulty = Some(difficulty);
                 }
             }
 
@@ -399,7 +401,7 @@ mod tests {
         source.state = Some(ProtocolState {
             extranonce1,
             extranonce2_size,
-            share_difficulty,
+            share_difficulty: share_difficulty.map(Difficulty::new),
             version_mask,
         });
 

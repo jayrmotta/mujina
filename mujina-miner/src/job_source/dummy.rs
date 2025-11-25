@@ -13,9 +13,11 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::types::{difficulty_for_share_interval, HashRate};
+
 use super::test_blocks::block_881423;
 use super::{
-    job, Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate,
+    Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate,
     SourceCommand, SourceEvent, VersionTemplate,
 };
 
@@ -85,9 +87,11 @@ impl DummySource {
             bits: *block_881423::BITS,
 
             // Share difficulty: ~1 share per 10 seconds at 1 TH/s
-            // Expected hashes = 1e12 hashes/sec x 10 sec = 1e13
-            // Difficulty = 1e13 / 2^32 ~= 2328
-            share_target: job::difficulty_to_target(2328),
+            share_target: difficulty_for_share_interval(
+                Duration::from_secs(10),
+                HashRate::from_terahashes(1.0),
+            )
+            .to_target(),
 
             time: block_881423::TIME,
 
