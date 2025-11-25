@@ -6,9 +6,9 @@
 use super::connection::Connection;
 use super::error::{StratumError, StratumResult};
 use super::messages::{ClientCommand, ClientEvent, JsonRpcMessage, SubmitParams};
-use crate::tracing::prelude::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, trace, warn};
 
 /// Pool connection configuration.
 #[derive(Debug, Clone)]
