@@ -9,6 +9,7 @@ pub use bitcoin::block::Header as BlockHeader;
 pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};
 
 use bitcoin::hashes::sha256d;
+use std::time::Duration;
 
 use crate::u256::U256;
 
@@ -104,6 +105,35 @@ impl HashRate {
     }
 }
 
+impl From<HashRate> for f64 {
+    fn from(rate: HashRate) -> Self {
+        rate.0 as f64
+    }
+}
+
+/// Calculate expected shares per second at given difficulty and hashrate.
+///
+/// Formula: shares_per_sec = hashrate / (difficulty * 2^32)
+///
+/// This represents the statistical average; actual share arrival follows
+/// a Poisson distribution.
+pub fn expected_shares_per_second(difficulty: Difficulty, hashrate: HashRate) -> f64 {
+    let hashes_per_share = u64::from(difficulty) as f64 * (u32::MAX as f64 + 1.0);
+    f64::from(hashrate) / hashes_per_share
+}
+
+/// Calculate expected time between shares at given difficulty and hashrate.
+///
+/// Returns the average time to find a share (1 / shares_per_sec).
+/// Actual time varies due to randomness in hash mining.
+pub fn expected_time_to_share(difficulty: Difficulty, hashrate: HashRate) -> Duration {
+    let shares_per_sec = expected_shares_per_second(difficulty, hashrate);
+    if shares_per_sec <= 0.0 {
+        return Duration::MAX;
+    }
+    Duration::from_secs_f64(1.0 / shares_per_sec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,8 +157,57 @@ mod tests {
         assert_eq!(rate.as_gigahashes(), 500.0);
         assert_eq!(rate.to_human_readable(), "500.00 GH/s");
     }
+
+    #[test]
+    fn test_hashrate_to_f64() {
+        let rate = HashRate::from_gigahashes(1.5);
+        let expected = 1_500_000_000.0;
+        assert_eq!(f64::from(rate), expected);
+    }
+
+    #[test]
+    fn test_expected_shares_per_second() {
+        // At 1 GH/s with difficulty 1024, expect roughly one share every ~4398 seconds
+        let diff = Difficulty::new(1024);
+        let hashrate = HashRate::from_gigahashes(1.0);
+
+        let shares_per_sec = expected_shares_per_second(diff, hashrate);
+        // 1 GH/s = 1e9 H/s, difficulty 1024 = 1024 * 2^32 hashes per share
+        // shares/sec = 1e9 / (1024 * 4294967296) ≈ 0.000227 shares/sec
+        assert!((shares_per_sec - 0.000227).abs() < 0.000001);
+    }
+
+    #[test]
+    fn test_expected_time_to_share() {
+        // At 1 GH/s with difficulty 1024
+        let diff = Difficulty::new(1024);
+        let hashrate = HashRate::from_gigahashes(1.0);
+
+        let time_to_share = expected_time_to_share(diff, hashrate);
+        // Should be ~4398 seconds (over an hour)
+        assert!((time_to_share.as_secs_f64() - 4398.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_share_calculations_extreme_hashrates() {
+        // Very low hashrate (CPU miner: 1 MH/s)
+        let diff = Difficulty::new(256);
+        let hashrate = HashRate::from_megahashes(1.0);
+        let time_to_share = expected_time_to_share(diff, hashrate);
+        // Should be over 1 million seconds
+        assert!(time_to_share.as_secs() > 1_000_000);
+
+        // Very high hashrate (datacenter: 100 TH/s)
+        let diff = Difficulty::new(100_000);
+        let hashrate = HashRate::from_terahashes(100.0);
+        let shares_per_sec = expected_shares_per_second(diff, hashrate);
+        // Should be roughly 0.23 shares per second
+        assert!((shares_per_sec - 0.233).abs() < 0.01);
+    }
 }
 
+mod difficulty;
 mod display_difficulty;
 
+pub use difficulty::Difficulty;
 pub use display_difficulty::DisplayDifficulty;
