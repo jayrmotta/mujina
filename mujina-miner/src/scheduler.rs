@@ -30,8 +30,9 @@
 //! where it belongs.
 
 use slotmap::SlotMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
@@ -40,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use crate::hash_thread::{task::HashTask, HashThread, HashThreadEvent};
 use crate::job_source::{JobTemplate, MerkleRootKind, SourceCommand, SourceEvent};
 use crate::tracing::prelude::*;
-use crate::types::HashRate;
+use crate::types::{expected_time_to_share_from_target, HashRate};
 
 /// Unique identifier for a job source, assigned by the scheduler.
 pub type SourceId = slotmap::DefaultKey;
@@ -114,6 +115,36 @@ async fn broadcast_hashrate(sources: &SlotMap<SourceId, SourceEntry>, hashrate: 
     }
 }
 
+/// Threshold for warning about high share difficulty.
+///
+/// If expected time to find a share exceeds this, warn the operator that the
+/// pool difficulty may be misconfigured for this hashrate.
+const HIGH_DIFFICULTY_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
+
+/// Warn if job difficulty is unreasonably high for our hashrate.
+///
+/// Returns `true` if warning was triggered, so caller can track and avoid
+/// repeated warnings.
+fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_name: &str) -> bool {
+    if hashrate.0 == 0 {
+        return false; // Can't calculate without hashrate
+    }
+
+    let time_to_share = expected_time_to_share_from_target(job.share_target, hashrate);
+
+    if time_to_share > HIGH_DIFFICULTY_THRESHOLD {
+        warn!(
+            source = %source_name,
+            job_id = %job.id,
+            expected_share_interval_secs = time_to_share.as_secs(),
+            "Share difficulty too high for hashrate (expected > 5 min between shares)"
+        );
+        true
+    } else {
+        false
+    }
+}
+
 // TODO: Future enhancements for frequency ramping:
 // - Make ramp parameters configurable (step size, delay, target)
 // - Monitor chip temperature/errors during ramp
@@ -178,6 +209,9 @@ pub async fn task(
     // Track thread count to detect disconnections
     let mut last_thread_count = threads.len();
 
+    // Track sources we've warned about high difficulty (reset on hashrate change)
+    let mut difficulty_warned_sources: HashSet<SourceId> = HashSet::new();
+
     // Main scheduler loop
 
     while !running.is_cancelled() {
@@ -212,6 +246,14 @@ pub async fn task(
                             job_id = %job_template.id,
                             "UpdateJob received"
                         );
+
+                        // Check if difficulty is reasonable for our hashrate (once per source)
+                        if !difficulty_warned_sources.contains(&source_id) {
+                            let hashrate = total_hashrate_estimate(&threads);
+                            if warn_if_difficulty_too_high(&job_template, hashrate, &source.name) {
+                                difficulty_warned_sources.insert(source_id);
+                            }
+                        }
 
                         // Extract EN2 range (only supported for computed merkle roots)
                         let full_en2_range = match &job_template.merkle_root {
@@ -258,6 +300,14 @@ pub async fn task(
                             job_id = %job_template.id,
                             "ReplaceJob received"
                         );
+
+                        // Check if difficulty is reasonable for our hashrate (once per source)
+                        if !difficulty_warned_sources.contains(&source_id) {
+                            let hashrate = total_hashrate_estimate(&threads);
+                            if warn_if_difficulty_too_high(&job_template, hashrate, &source.name) {
+                                difficulty_warned_sources.insert(source_id);
+                            }
+                        }
 
                         // Extract EN2 range (only supported for computed merkle roots)
                         let full_en2_range = match &job_template.merkle_root {
@@ -418,6 +468,9 @@ pub async fn task(
                 let hashrate = total_hashrate_estimate(&threads);
                 broadcast_hashrate(&sources, hashrate).await;
 
+                // Reset difficulty warnings since hashrate changed
+                difficulty_warned_sources.clear();
+
                 last_thread_count = thread_events.len();
             }
 
@@ -457,6 +510,9 @@ pub async fn task(
             // Broadcast updated hashrate to all sources
             let hashrate = total_hashrate_estimate(&threads);
             broadcast_hashrate(&sources, hashrate).await;
+
+            // Reset difficulty warnings since hashrate changed
+            difficulty_warned_sources.clear();
         }
     }
 
