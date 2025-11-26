@@ -134,6 +134,23 @@ pub fn expected_time_to_share(difficulty: Difficulty, hashrate: HashRate) -> Dur
     Duration::from_secs_f64(1.0 / shares_per_sec)
 }
 
+/// Calculate expected time between shares from a Target and hashrate.
+///
+/// Uses rust-bitcoin's `Target::difficulty_float()` directly, avoiding
+/// intermediate Difficulty conversion.
+pub fn expected_time_to_share_from_target(target: Target, hashrate: HashRate) -> Duration {
+    if hashrate.0 == 0 {
+        return Duration::MAX;
+    }
+    let difficulty_float = target.difficulty_float();
+    let hashes_per_share = difficulty_float * (u32::MAX as f64 + 1.0);
+    let shares_per_sec = hashrate.0 as f64 / hashes_per_share;
+    if shares_per_sec <= 0.0 {
+        return Duration::MAX;
+    }
+    Duration::from_secs_f64(1.0 / shares_per_sec)
+}
+
 /// Calculate difficulty to achieve approximately one share per `interval`.
 ///
 /// This is the inverse of `expected_time_to_share`. Useful for setting pool
