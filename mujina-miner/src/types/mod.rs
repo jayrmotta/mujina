@@ -8,7 +8,6 @@ mod bitcoin_impls;
 mod difficulty;
 mod hash_rate;
 
-use bitcoin::hashes::sha256d;
 use std::time::Duration;
 
 // Re-export frequently used bitcoin types for convenience
@@ -16,34 +15,6 @@ pub use bitcoin::block::Header as BlockHeader;
 pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};
 pub use difficulty::Difficulty;
 pub use hash_rate::HashRate;
-
-/// A mining job sent to ASIC chips.
-#[derive(Debug, Clone)]
-pub struct Job {
-    /// The block header to mine
-    pub header: BlockHeader,
-    /// Unique identifier for this job
-    pub job_id: u64,
-    /// Current merkle root
-    pub merkle_root: sha256d::Hash,
-    /// Encoded difficulty target
-    pub nbits: u32,
-    /// Time offset for rolling
-    pub ntime_offset: u32,
-}
-
-/// A share (valid nonce) found by an ASIC chip.
-#[derive(Debug, Clone)]
-pub struct Share {
-    /// Job this share is for
-    pub job_id: u64,
-    /// The winning nonce
-    pub nonce: u32,
-    /// Timestamp when found
-    pub ntime: u32,
-    /// Which chip found it
-    pub chip_id: u8,
-}
 
 /// Calculate expected shares per second at given difficulty and hashrate.
 ///
