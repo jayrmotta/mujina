@@ -6,9 +6,9 @@
 //! lifecycle (hotplug, emergency shutdown, etc.).
 
 use crate::{
+    asic::hash_thread::HashThread,
     board::{Board, BoardDescriptor},
     error::Result,
-    hash_thread::HashThread,
     tracing::prelude::*,
     transport::{usb::TransportEvent as UsbTransportEvent, TransportEvent, UsbDeviceInfo},
 };

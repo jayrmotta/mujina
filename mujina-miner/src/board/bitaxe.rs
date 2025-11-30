@@ -16,10 +16,10 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::{
     asic::{
-        bm13xx::{self, protocol::Command, BM13xxProtocol},
+        bm13xx::{self, protocol::Command, thread::BM13xxThread, BM13xxProtocol},
+        hash_thread::{BoardPeripherals, HashThread, ThreadRemovalSignal},
         ChipInfo,
     },
-    hash_thread::{bm13xx::BM13xxThread, BoardPeripherals, HashThread, ThreadRemovalSignal},
     hw_trait::{
         gpio::{Gpio, GpioPin, PinValue},
         i2c::I2c,
@@ -51,7 +51,7 @@ struct BitaxeAsicEnable {
 }
 
 #[async_trait]
-impl crate::hash_thread::AsicEnable for BitaxeAsicEnable {
+impl crate::asic::hash_thread::AsicEnable for BitaxeAsicEnable {
     async fn enable(&mut self) -> anyhow::Result<()> {
         // Release reset (nRST is active-low, so High = running)
         self.nrst_pin

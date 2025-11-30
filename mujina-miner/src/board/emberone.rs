@@ -26,7 +26,10 @@ use super::{
     pattern::{Match, StringMatch},
     Board, BoardError, BoardEvent, BoardInfo,
 };
-use crate::{asic::ChipInfo, hash_thread::HashThread, transport::UsbDeviceInfo};
+use crate::{
+    asic::{hash_thread::HashThread, ChipInfo},
+    transport::UsbDeviceInfo,
+};
 
 /// EmberOne mining board (stub implementation).
 pub struct EmberOne {

@@ -38,7 +38,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
 use tokio_util::sync::CancellationToken;
 
-use crate::hash_thread::{task::HashTask, HashThread, HashThreadEvent};
+use crate::asic::hash_thread::{HashTask, HashThread, HashThreadEvent};
 use crate::job_source::{JobTemplate, MerkleRootKind, SourceCommand, SourceEvent};
 use crate::tracing::prelude::*;
 use crate::types::{expected_time_to_share_from_target, HashRate};

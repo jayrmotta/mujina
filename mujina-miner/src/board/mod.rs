@@ -7,8 +7,7 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use tokio::sync::mpsc;
 
 use crate::{
-    asic::{ChipError, ChipInfo, NonceResult},
-    hash_thread::HashThread,
+    asic::{hash_thread::HashThread, ChipError, ChipInfo, NonceResult},
     transport::UsbDeviceInfo,
 };
 

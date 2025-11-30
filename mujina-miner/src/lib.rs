@@ -6,7 +6,6 @@ pub mod board;
 pub mod config;
 pub mod daemon;
 pub mod error;
-pub mod hash_thread;
 pub mod hw_trait;
 pub mod job_source;
 pub mod mgmt_protocol;

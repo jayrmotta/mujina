@@ -10,8 +10,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::tracing::prelude::*;
 use crate::{
     api::{self, ApiConfig},
+    asic::hash_thread::HashThread,
     backplane::Backplane,
-    hash_thread::HashThread,
     job_source::{dummy::DummySource, stratum_v1::StratumV1Source, SourceEvent},
     scheduler::{self, SourceRegistration},
     stratum_v1::PoolConfig as StratumPoolConfig,
