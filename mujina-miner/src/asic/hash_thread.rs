@@ -15,7 +15,7 @@
 //!
 //! 2. **HashTask.share_target (thread-to-scheduler filter):**
 //!    Scheduler sets when assigning work. Thread computes hash for every chip
-//!    nonce and emits ShareFound only for shares meeting task.share_target.
+//!    nonce and sends shares meeting task.share_target via the task's channel.
 //!    Controls message volume to scheduler.
 //!
 //! 3. **JobTemplate.share_target (scheduler-to-source filter):**
@@ -26,6 +26,7 @@
 //! while limiting pool submissions (template.share_target). Message volume
 //! is manageable: ~1-2 shares/sec to scheduler, fewer to pool.
 
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,8 +35,7 @@ use bitcoin::pow::Target;
 use bitcoin::BlockHash;
 use tokio::sync::mpsc;
 
-use crate::job_source::{Extranonce2, Extranonce2Range};
-use crate::scheduler::ActiveJob;
+use crate::job_source::{Extranonce2, Extranonce2Range, JobTemplate};
 use crate::types::HashRate;
 
 /// HashThread capabilities reported to scheduler for work assignment decisions.
@@ -78,11 +78,12 @@ pub struct HashThreadStatus {
 /// When a thread shuts down (USB unplug, fault, user request, etc.), it closes
 /// its event channel instead of sending an event. The scheduler detects channel
 /// closure and handles thread removal.
+///
+/// Note: Shares are sent via the task's dedicated `share_tx` channel, not
+/// through this event channel. This separates share routing (task-specific)
+/// from general thread events.
 #[derive(Debug)]
 pub enum HashThreadEvent {
-    /// Valid share found (already filtered by pool_target)
-    ShareFound(Share),
-
     /// Work approaching exhaustion (warning to scheduler)
     WorkDepletionWarning {
         /// Estimated remaining time in milliseconds
@@ -250,17 +251,15 @@ pub trait HashThread: Send {
 
 /// Work assignment from scheduler to hash thread.
 ///
-/// Represents actual mining work from a job source (pool or dummy). Contains
-/// the job (template + source association), the extranonce2 range allocated
-/// to this thread, and state for resumable work iteration.
+/// Contains the job template, allocated extranonce2 range, and a channel for
+/// returning shares. The scheduler creates a channel for each task; shares
+/// sent on that channel implicitly route back to the correct source.
 ///
-/// The scheduler maps jobs back to sources via the ActiveJob. Threads don't
-/// need to know about sources. If a thread has no HashTask (None), it's idle
-/// (low power, no hashing).
-#[derive(Debug, Clone)]
+/// If a thread has no HashTask (None), it's idle (low power, no hashing).
+#[derive(Clone)]
 pub struct HashTask {
-    /// Job to work on (template + source association)
-    pub job: Arc<ActiveJob>,
+    /// Job template (block header fields, merkle info, etc.)
+    pub template: Arc<JobTemplate>,
 
     /// Extranonce2 range allocated to this thread.
     ///
@@ -278,7 +277,7 @@ pub struct HashTask {
 
     /// Share target for thread-to-scheduler submission threshold.
     ///
-    /// Thread emits ShareFound only for shares meeting this target. Allows
+    /// Thread sends shares meeting this target via `share_tx`. Allows
     /// scheduler to control message volume independently from pool submission
     /// difficulty. Typically set easier than source threshold for monitoring.
     pub share_target: Target,
@@ -287,36 +286,54 @@ pub struct HashTask {
     ///
     /// May be rolled forward during mining. To start, uses the job's time field.
     pub ntime: u32,
+
+    /// Channel for submitting shares back to scheduler.
+    ///
+    /// Scheduler creates this channel and keeps the receiver. Thread sends
+    /// valid shares here; channel ownership implicitly routes to correct source.
+    pub share_tx: mpsc::Sender<Share>,
+}
+
+impl fmt::Debug for HashTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashTask")
+            .field("template", &self.template)
+            .field("en2_range", &self.en2_range)
+            .field("en2", &self.en2)
+            .field("share_target", &self.share_target)
+            .field("ntime", &self.ntime)
+            .field("share_tx", &"<channel>")
+            .finish()
+    }
 }
 
 /// Valid share found by a HashThread.
 ///
-/// Hash has been computed and verified against the job target. Scheduler uses
-/// the task reference to route shares back to the originating source.
+/// Contains the nonce and computed hash, plus header fields needed for pool
+/// submission. Routing to the correct source is implicit: the scheduler knows
+/// which source owns the channel that delivered this share.
 #[derive(Debug, Clone)]
 pub struct Share {
-    /// Task this share solves (contains job template and source mapping)
-    pub task: Arc<HashTask>,
-
     /// Winning nonce
     pub nonce: u32,
 
     /// Computed block hash
     pub hash: BlockHash,
 
-    /// Threshold difficulty this share was validated against.
-    ///
-    /// This represents the expected hashing work, not the achieved difficulty.
-    /// Used for hashrate calculation where each share represents the same
-    /// expected work regardless of its actual hash difficulty (which is luck).
-    pub threshold_difficulty: f64,
-
     /// Version bits
+    /// TODO: clarify whether this is the entire version or only rolled bits
     pub version: Version,
 
     /// Block timestamp
     pub ntime: u32,
 
-    /// Extranonce2 value used (None in, e.g., header-only mining in Stratum v2)
+    /// Extranonce2 value used (None for header-only mining in Stratum v2)
     pub extranonce2: Option<Extranonce2>,
+
+    /// Threshold difficulty this share was validated against.
+    ///
+    /// Represents expected hashing work, not achieved difficulty. Used for
+    /// hashrate calculation where each share represents the same expected
+    /// work regardless of its actual hash difficulty (which is luck).
+    pub threshold_difficulty: f64,
 }

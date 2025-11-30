@@ -575,7 +575,7 @@ fn task_to_job_full(
 ) -> Result<protocol::JobFullFormat, HashThreadError> {
     use crate::job_source::MerkleRootKind;
 
-    let template = &task.job.template;
+    let template = task.template.as_ref();
 
     // Get merkle root (computed or fixed)
     let merkle_root = match &template.merkle_root {
@@ -681,7 +681,7 @@ fn calculate_pll_for_frequency(target_freq: f32) -> Option<protocol::PllConfig> 
 /// configured when scheduler assigns first work.
 async fn bm13xx_thread_actor<R, W>(
     mut cmd_rx: mpsc::Receiver<ThreadCommand>,
-    evt_tx: mpsc::Sender<HashThreadEvent>,
+    _evt_tx: mpsc::Sender<HashThreadEvent>,
     mut removal_rx: watch::Receiver<ThreadRemovalSignal>,
     status: Arc<RwLock<HashThreadStatus>>,
     mut chip_responses: R,
@@ -733,12 +733,12 @@ async fn bm13xx_thread_actor<R, W>(
                     ThreadCommand::UpdateWork { new_task, response_tx } => {
                         if let Some(ref old) = current_task {
                             debug!(
-                                old_job = %old.job.template.id,
-                                new_job = %new_task.job.template.id,
+                                old_job = %old.template.id,
+                                new_job = %new_task.template.id,
                                 "Updating work"
                             );
                         } else {
-                            debug!(new_job = %new_task.job.template.id, "Updating work from idle");
+                            debug!(new_job = %new_task.template.id, "Updating work from idle");
                         }
 
                         if !chip_initialized {
@@ -784,12 +784,12 @@ async fn bm13xx_thread_actor<R, W>(
                     ThreadCommand::ReplaceWork { new_task, response_tx } => {
                         if let Some(ref old) = current_task {
                             debug!(
-                                old_job = %old.job.template.id,
-                                new_job = %new_task.job.template.id,
+                                old_job = %old.template.id,
+                                new_job = %new_task.template.id,
                                 "Replacing work"
                             );
                         } else {
-                            debug!(new_job = %new_task.job.template.id, "Replacing work from idle");
+                            debug!(new_job = %new_task.template.id, "Replacing work from idle");
                         }
 
                         if !chip_initialized {
@@ -864,7 +864,7 @@ async fn bm13xx_thread_actor<R, W>(
                             protocol::Response::Nonce { nonce, job_id, version, midstate_num, subcore_id } => {
                                 // Look up the task for this job_id
                                 if let Some(task) = chip_jobs.get(job_id) {
-                                    let template = &task.job.template;
+                                    let template = task.template.as_ref();
 
                                     // Reconstruct full version from rolling field
                                     let full_version = version.apply_to_version(template.version.base());
@@ -890,18 +890,18 @@ async fn bm13xx_thread_actor<R, W>(
                                                 // Create share with threshold difficulty for hashrate calculation
                                                 let threshold_difficulty = task.share_target.difficulty_float();
                                                 let share = Share {
-                                                    task: Arc::new(task.clone()),
                                                     nonce,
                                                     hash,
-                                                    threshold_difficulty,
                                                     version: full_version,
                                                     ntime: task.ntime,
                                                     extranonce2: task.en2,
+                                                    threshold_difficulty,
                                                 };
 
-                                                // Emit event
-                                                if evt_tx.send(HashThreadEvent::ShareFound(share)).await.is_err() {
-                                                    debug!("Failed to send ShareFound event (scheduler gone)");
+                                                // Send via task's dedicated channel
+                                                if task.share_tx.send(share).await.is_err() {
+                                                    // Channel closed = task replaced, share is stale
+                                                    debug!("Share channel closed (task replaced)");
                                                 } else {
                                                     debug!(
                                                         chip_job_id = job_id,
@@ -909,7 +909,7 @@ async fn bm13xx_thread_actor<R, W>(
                                                         hash = %hash,
                                                         hash_diff = %Difficulty::from_hash(&hash),
                                                         target_diff = %Difficulty::from_target(task.share_target),
-                                                        "Share found and reported"
+                                                        "Share found and sent"
                                                     );
                                                 }
                                             } else {
@@ -991,11 +991,10 @@ mod tests {
         use crate::job_source::{
             Extranonce2, GeneralPurposeBits, JobTemplate, MerkleRootKind, VersionTemplate,
         };
-        use crate::scheduler::ActiveJob;
 
         // Create a JobTemplate with test data values
         // Use MerkleRootKind::Fixed with the exact merkle_root from capture
-        let template = JobTemplate {
+        let template = Arc::new(JobTemplate {
             id: "test".into(),
             prev_blockhash: *esp_miner_job::wire_tx::PREV_BLOCKHASH,
             version: VersionTemplate::new(
@@ -1007,20 +1006,21 @@ mod tests {
             share_target: crate::types::Difficulty::new(100).to_target(),
             time: *esp_miner_job::wire_tx::NTIME,
             merkle_root: MerkleRootKind::Fixed(*esp_miner_job::wire_tx::MERKLE_ROOT),
-        };
+        });
 
         // Dummy EN2 (doesn't matter since we're using Fixed merkle root)
         let dummy_en2 = Extranonce2::new(0, 1).unwrap();
 
+        // Create dummy channel (not used in this test, just for struct construction)
+        let (share_tx, _share_rx) = mpsc::channel(1);
+
         let task = HashTask {
-            job: Arc::new(ActiveJob {
-                source_id: slotmap::DefaultKey::default(),
-                template,
-            }),
+            template,
             en2_range: None,
             en2: Some(dummy_en2),
             share_target: crate::types::Difficulty::new(100).to_target(),
             ntime: *esp_miner_job::wire_tx::NTIME,
+            share_tx,
         };
 
         // Convert to JobFullFormat

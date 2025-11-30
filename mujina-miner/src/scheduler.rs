@@ -12,7 +12,7 @@
 //!
 //! **Layer 2 - HashTask.share_target (thread-to-scheduler filter):**
 //! - Configured by scheduler when assigning work
-//! - Thread validates and emits ShareFound only for shares meeting this
+//! - Thread validates and sends shares meeting this via task's share channel
 //! - Controls message volume to scheduler
 //! - Allows per-thread difficulty adjustment
 //!
@@ -30,7 +30,7 @@
 //! where it belongs.
 
 use slotmap::SlotMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -38,7 +38,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
 use tokio_util::sync::CancellationToken;
 
-use crate::asic::hash_thread::{HashTask, HashThread, HashThreadEvent};
+use crate::asic::hash_thread::{HashTask, HashThread, HashThreadEvent, Share};
 use crate::job_source::{JobTemplate, MerkleRootKind, SourceCommand, SourceEvent};
 use crate::tracing::prelude::*;
 use crate::types::{expected_time_to_share_from_target, HashRate};
@@ -49,19 +49,23 @@ pub type SourceId = slotmap::DefaultKey;
 /// Unique identifier for a hash thread, assigned by the scheduler.
 pub type ThreadId = slotmap::DefaultKey;
 
-/// Association between a job template and its originating source.
-///
-/// When the scheduler receives a job from a source, it wraps it in ActiveJob
-/// to track the source association. HashTasks reference this via Arc, allowing
-/// shares to be routed back to the correct source without threads needing to
-/// know about sources.
-#[derive(Debug, Clone)]
-pub struct ActiveJob {
-    /// Source that provided this job
-    pub source_id: SourceId,
+/// Unique identifier for a task, assigned by the scheduler.
+pub type TaskId = slotmap::DefaultKey;
 
-    /// Job template with block header fields
-    pub template: JobTemplate,
+/// Scheduler-side bookkeeping for an active task.
+///
+/// Each HashTask sent to a thread has a corresponding TaskEntry in the
+/// scheduler. When a share arrives on the task's channel, this provides
+/// routing: which source to submit to and the job template for validation.
+struct TaskEntry {
+    /// Source that provided this job
+    source_id: SourceId,
+
+    /// Job template (shared with the HashTask sent to thread)
+    template: Arc<JobTemplate>,
+
+    /// Thread this task was assigned to
+    thread_id: ThreadId,
 }
 
 /// Registration message for adding a job source to the scheduler.
@@ -167,8 +171,9 @@ pub async fn task(
     let mut threads: SlotMap<ThreadId, Box<dyn HashThread>> = SlotMap::new();
     let mut thread_events: StreamMap<ThreadId, ReceiverStream<HashThreadEvent>> = StreamMap::new();
 
-    // Track which job each thread is working on
-    let mut thread_assignments: HashMap<ThreadId, Arc<ActiveJob>> = HashMap::new();
+    // Task bookkeeping: each task gets an entry and a share channel
+    let mut tasks: SlotMap<TaskId, TaskEntry> = SlotMap::new();
+    let mut share_channels: StreamMap<TaskId, ReceiverStream<Share>> = StreamMap::new();
 
     // Wait for the first set of hash threads from the backplane
     let initial_threads = match thread_rx.recv().await {
@@ -265,32 +270,38 @@ pub async fn task(
                             }
                         };
 
-                        // Create active job with source association
-                        let active_job = Arc::new(ActiveJob {
-                            source_id,
-                            template: job_template,
-                        });
+                        let template = Arc::new(job_template);
 
                         // Split EN2 range among all threads
                         let en2_slices = full_en2_range.split(threads.len())
                             .expect("Failed to split EN2 range among threads");
 
-                        // Assign work to all threads
+                        // Assign work to all threads (old tasks remain valid)
                         for ((thread_id, thread), en2_range) in threads.iter_mut().zip(en2_slices) {
                             let starting_en2 = en2_range.iter().next();
 
-                            let task = HashTask {
-                                job: active_job.clone(),
+                            // Create share channel for this task
+                            let (share_tx, share_rx) = mpsc::channel(32);
+
+                            let hash_task = HashTask {
+                                template: template.clone(),
                                 en2_range: Some(en2_range),
                                 en2: starting_en2,
-                                share_target: active_job.template.share_target,
-                                ntime: active_job.template.time,
+                                share_target: template.share_target,
+                                ntime: template.time,
+                                share_tx,
                             };
 
-                            if let Err(e) = thread.update_work(task).await {
+                            if let Err(e) = thread.update_work(hash_task).await {
                                 error!(thread_id = ?thread_id, error = %e, "Failed to assign work");
                             } else {
-                                thread_assignments.insert(thread_id, active_job.clone());
+                                // Register task in scheduler (old tasks stay active)
+                                let task_id = tasks.insert(TaskEntry {
+                                    source_id,
+                                    template: template.clone(),
+                                    thread_id,
+                                });
+                                share_channels.insert(task_id, ReceiverStream::new(share_rx));
                             }
                         }
                     }
@@ -319,11 +330,18 @@ pub async fn task(
                             }
                         };
 
-                        // Create active job with source association
-                        let active_job = Arc::new(ActiveJob {
-                            source_id,
-                            template: job_template,
-                        });
+                        // Invalidate old tasks for this source (close channels, stale shares fail)
+                        let old_task_ids: Vec<TaskId> = tasks
+                            .iter()
+                            .filter(|(_, entry)| entry.source_id == source_id)
+                            .map(|(id, _)| id)
+                            .collect();
+                        for task_id in old_task_ids {
+                            tasks.remove(task_id);
+                            share_channels.remove(&task_id);
+                        }
+
+                        let template = Arc::new(job_template);
 
                         // Split EN2 range among all threads
                         let en2_slices = full_en2_range.split(threads.len())
@@ -333,18 +351,28 @@ pub async fn task(
                         for ((thread_id, thread), en2_range) in threads.iter_mut().zip(en2_slices) {
                             let starting_en2 = en2_range.iter().next();
 
-                            let task = HashTask {
-                                job: active_job.clone(),
+                            // Create share channel for this task
+                            let (share_tx, share_rx) = mpsc::channel(32);
+
+                            let hash_task = HashTask {
+                                template: template.clone(),
                                 en2_range: Some(en2_range),
                                 en2: starting_en2,
-                                share_target: active_job.template.share_target,
-                                ntime: active_job.template.time,
+                                share_target: template.share_target,
+                                ntime: template.time,
+                                share_tx,
                             };
 
-                            if let Err(e) = thread.replace_work(task).await {
+                            if let Err(e) = thread.replace_work(hash_task).await {
                                 error!(thread_id = ?thread_id, error = %e, "Failed to replace work");
                             } else {
-                                thread_assignments.insert(thread_id, active_job.clone());
+                                // Register new task
+                                let task_id = tasks.insert(TaskEntry {
+                                    source_id,
+                                    template: template.clone(),
+                                    thread_id,
+                                });
+                                share_channels.insert(task_id, ReceiverStream::new(share_rx));
                             }
                         }
                     }
@@ -352,80 +380,84 @@ pub async fn task(
                     SourceEvent::ClearJobs => {
                         debug!(source = %source.name, "ClearJobs received");
 
-                        let affected_threads: Vec<ThreadId> = thread_assignments
+                        // Remove tasks for this source (channels close, stale shares fail)
+                        // Don't idle threads---they continue with current work until
+                        // it's exhausted or new work arrives from another source
+                        let old_task_ids: Vec<TaskId> = tasks
                             .iter()
-                            .filter(|(_, job)| job.source_id == source_id)
-                            .map(|(tid, _)| *tid)
+                            .filter(|(_, entry)| entry.source_id == source_id)
+                            .map(|(id, _)| id)
                             .collect();
-
-                        for tid in affected_threads {
-                            if let Some(thread) = threads.get_mut(tid) {
-                                if let Err(e) = thread.go_idle().await {
-                                    error!(thread_id = ?tid, error = %e, "Failed to idle thread");
-                                }
-                            }
-                            thread_assignments.remove(&tid);
+                        for task_id in old_task_ids {
+                            tasks.remove(task_id);
+                            share_channels.remove(&task_id);
                         }
                     }
+                }
+            }
+
+            // Share channels (from tasks)
+            Some((task_id, share)) = share_channels.next() => {
+                // Look up task context for routing
+                let Some(task_entry) = tasks.get(task_id) else {
+                    // Task was removed (ReplaceJob/ClearJobs) but share arrived
+                    // before channel closed. This is normal; just drop the share.
+                    trace!(task_id = ?task_id, "Share for removed task (dropped)");
+                    continue;
+                };
+
+                debug!(
+                    task_id = ?task_id,
+                    job_id = %task_entry.template.id,
+                    nonce = format!("{:#x}", share.nonce),
+                    hash = %share.hash,
+                    "Share found"
+                );
+
+                // Track hashes for hashrate measurement
+                // Use threshold difficulty, not achieved difficulty (see MiningStats doc)
+                let hashes = (share.threshold_difficulty * (u32::MAX as f64 + 1.0)) as u128;
+                stats.total_hashes += hashes;
+
+                // Check if share meets source threshold
+                if task_entry.template.share_target.is_met_by(share.hash) {
+                    stats.shares_submitted += 1;
+
+                    // Submit share to originating source
+                    if let Some(source) = sources.get(task_entry.source_id) {
+                        use crate::job_source::Share as SourceShare;
+                        let source_share = SourceShare {
+                            job_id: task_entry.template.id.clone(),
+                            nonce: share.nonce,
+                            time: share.ntime,
+                            version: share.version,
+                            extranonce2: share.extranonce2,
+                        };
+
+                        if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
+                            error!(
+                                source_id = ?task_entry.source_id,
+                                error = %e,
+                                "Failed to submit share to source"
+                            );
+                        } else {
+                            debug!(source = %source.name, "Share submitted to source");
+                        }
+                    } else {
+                        error!(source_id = ?task_entry.source_id, "Share for unknown source");
+                    }
+                } else {
+                    trace!(
+                        task_id = ?task_id,
+                        nonce = format!("{:#x}", share.nonce),
+                        "Share below source threshold (not submitted)"
+                    );
                 }
             }
 
             // Thread events
             Some((thread_id, event)) = thread_events.next() => {
                 match event {
-                    HashThreadEvent::ShareFound(share) => {
-                        debug!(
-                            thread_id = ?thread_id,
-                            job_id = %share.task.job.template.id,
-                            nonce = format!("{:#x}", share.nonce),
-                            hash = %share.hash,
-                            "Share found"
-                        );
-
-                        // Track hashes for hashrate measurement
-                        // Use threshold difficulty, not achieved difficulty (see MiningStats doc)
-                        let hashes = (share.threshold_difficulty * (u32::MAX as f64 + 1.0)) as u128;
-                        stats.total_hashes += hashes;
-
-                        // Check if share meets source threshold
-                        let source_id = share.task.job.source_id;
-                        let template = &share.task.job.template;
-
-                        if template.share_target.is_met_by(share.hash) {
-                            stats.shares_submitted += 1;
-
-                            // Submit share to originating source
-                            if let Some(source) = sources.get(source_id) {
-                                use crate::job_source::Share as SourceShare;
-                                let source_share = SourceShare {
-                                    job_id: template.id.clone(),
-                                    nonce: share.nonce,
-                                    time: share.ntime,
-                                    version: share.version,
-                                    extranonce2: share.extranonce2,
-                                };
-
-                                if let Err(e) = source.command_tx.send(SourceCommand::SubmitShare(source_share)).await {
-                                    error!(
-                                        source_id = ?source_id,
-                                        error = %e,
-                                        "Failed to submit share to source"
-                                    );
-                                } else {
-                                    debug!(source = %source.name, "Share submitted to source");
-                                }
-                            } else {
-                                error!(source_id = ?source_id, "Share for unknown source");
-                            }
-                        } else {
-                            trace!(
-                                thread_id = ?thread_id,
-                                nonce = format!("{:#x}", share.nonce),
-                                "Share below source threshold (not submitted)"
-                            );
-                        }
-                    }
-
                     HashThreadEvent::WorkExhausted { en2_searched } => {
                         info!(thread_id = ?thread_id, en2_searched, "Work exhausted");
                         // TODO: Assign new work to this thread
@@ -502,9 +534,19 @@ pub async fn task(
             );
 
             // Remove threads that no longer have active event streams
-            let active_ids: std::collections::HashSet<_> = thread_events.keys().collect();
-            threads.retain(|id, _| active_ids.contains(&id));
-            thread_assignments.retain(|id, _| active_ids.contains(id));
+            let active_thread_ids: HashSet<_> = thread_events.keys().collect();
+            threads.retain(|id, _| active_thread_ids.contains(&id));
+
+            // Remove tasks for disconnected threads
+            let stale_task_ids: Vec<TaskId> = tasks
+                .iter()
+                .filter(|(_, entry)| !active_thread_ids.contains(&entry.thread_id))
+                .map(|(id, _)| id)
+                .collect();
+            for task_id in stale_task_ids {
+                tasks.remove(task_id);
+                share_channels.remove(&task_id);
+            }
 
             last_thread_count = current_count;
 
