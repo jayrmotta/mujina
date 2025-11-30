@@ -321,8 +321,9 @@ pub struct Share {
     /// Computed block hash
     pub hash: BlockHash,
 
-    /// Version bits
-    /// TODO: clarify whether this is the entire version or only rolled bits
+    /// Full block version with rolled bits applied.
+    ///
+    /// Contains the complete version field as it appears in the block header.
     pub version: Version,
 
     /// Block timestamp
