@@ -891,7 +891,7 @@ mod tests {
                     extranonce2_size,
                 } => {
                     println!("\n[Subscribed]");
-                    println!("  Extranonce1: {}", hex::encode(&extranonce1));
+                    println!("  Extranonce1: {}", hex::encode(extranonce1));
                     println!("  Extranonce2 size: {} bytes", extranonce2_size);
                     assert!(!extranonce1.is_empty(), "extranonce1 should not be empty");
                     assert!(
