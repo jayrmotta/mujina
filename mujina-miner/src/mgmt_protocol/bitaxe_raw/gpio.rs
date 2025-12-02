@@ -1,6 +1,7 @@
 //! GPIO implementation using bitaxe-raw control protocol.
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use super::channel::ControlChannel;
 use super::Packet;
@@ -59,6 +60,7 @@ impl GpioPin for BitaxeRawGpioPin {
     }
 
     async fn write(&mut self, value: PinValue) -> Result<()> {
+        debug!(pin = self.number, value = ?value, "GPIO write");
         let packet = Packet::gpio_write(0, self.number, value.into());
         self.channel.send_packet(packet).await?;
         Ok(())
@@ -76,10 +78,12 @@ impl GpioPin for BitaxeRawGpioPin {
             )));
         }
 
-        Ok(if response.data[0] != 0 {
+        let value = if response.data[0] != 0 {
             PinValue::High
         } else {
             PinValue::Low
-        })
+        };
+        debug!(pin = self.number, value = ?value, "GPIO read");
+        Ok(value)
     }
 }
