@@ -700,9 +700,9 @@ impl StratumV1Client {
                 } => {
                     match cmd {
                         ClientCommand::SubmitShare(params) => {
-                            debug!(job_id = %params.job_id, "Submitting share to pool");
+                            debug!(pool = %self.config.url, job_id = %params.job_id, "Submitting share");
                             if let Err(e) = self.submit(&mut conn, params).await {
-                                warn!(error = %e, "Failed to submit share");
+                                warn!(pool = %self.config.url, error = %e, "Failed to submit share");
                             }
                             // Acceptance/rejection emitted via ShareAccepted/ShareRejected events
                         }

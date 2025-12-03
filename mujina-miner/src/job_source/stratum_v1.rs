@@ -333,9 +333,10 @@ impl StratumV1Source {
                     match cmd {
                         SourceCommand::SubmitShare(share) => {
                             debug!(
+                                pool = %self.name(),
                                 job_id = %share.job_id,
                                 nonce = format!("{:#x}", share.nonce),
-                                "Submitting share to pool"
+                                "Submitting share"
                             );
 
                             // Convert share to Stratum format and send to client
