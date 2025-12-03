@@ -151,8 +151,12 @@ impl Extranonce2Range {
     }
 
     /// Get the total number of values in the range.
+    ///
+    /// Returns `u64::MAX` if the range spans the entire u64 space (the true
+    /// count would be 2^64 which doesn't fit in a u64).
     pub fn len(&self) -> u64 {
-        self.max - self.min + 1
+        // Use saturating_add to handle the full-range case (min=0, max=u64::MAX)
+        (self.max - self.min).saturating_add(1)
     }
 
     /// Check if the range is empty.
@@ -404,6 +408,14 @@ mod tests {
         let (lower, upper) = iter.size_hint();
         assert_eq!(lower, 100);
         assert_eq!(upper, Some(100));
+    }
+
+    #[test]
+    fn test_full_u64_range_len() {
+        // 8-byte extranonce2 spans entire u64 space (min=0, max=u64::MAX)
+        let range = Extranonce2Range::new(8).unwrap();
+        // len() would be 2^64 but that doesn't fit in u64, so saturates to MAX
+        assert_eq!(range.len(), u64::MAX);
     }
 
     #[test]
