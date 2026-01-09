@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use super::{JobTemplate, SourceCommand, SourceEvent};
-use crate::types::{target_for_share_rate, HashRate, ShareRate};
+use crate::types::{target_for_share_rate, Difficulty, HashRate, ShareRate};
 
 /// Configuration for forced share rate wrapper.
 pub struct ForcedRateConfig {
@@ -126,6 +126,7 @@ impl ForcedRateSource {
             job_id = %job.id,
             hashrate = %self.hashrate,
             target_rate = %self.target_rate,
+            difficulty = %Difficulty::from_target(target),
             "Forcing share target"
         );
 
