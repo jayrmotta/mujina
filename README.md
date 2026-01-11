@@ -52,6 +52,9 @@ Planned support:
 
 - [Architecture Overview](docs/architecture.md) - System design and component
   interaction
+- [CPU Mining](docs/cpu-mining.md) - Run without hardware for development and
+  testing
+- [Container Image](docs/container.md) - Build and run as a container
 - [Contribution Guide](CONTRIBUTING.md) - How to contribute to the project
 - [Code Style Guide](CODE_STYLE.md) - Formatting and style rules
 - [Coding Guidelines](CODING_GUIDELINES.md) - Best practices and design
@@ -125,6 +128,15 @@ The password defaults to "x" if not specified.
 Without `MUJINA_POOL_URL`, the miner runs with a dummy job source that
 generates synthetic mining work, which is useful for testing hardware without a
 pool connection.
+
+### Running Without Hardware
+
+For development and testing without physical mining hardware, the miner
+includes a CPU mining backend. See [CPU Mining](docs/cpu-mining.md) for
+details.
+
+A container image is available for deploying to cloud infrastructure or
+Kubernetes for pool and miner testing. See [Container Image](docs/container.md).
 
 ### Log Levels
 
