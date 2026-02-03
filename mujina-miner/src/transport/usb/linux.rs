@@ -83,13 +83,12 @@ pub(super) fn find_serial_ports_for_device(device_path: &str) -> Result<Vec<Stri
             current = dev.parent();
         }
 
-        if is_child {
+        if is_child
+            && let Some(devnode) = tty_device.devnode()
+            && let Some(path_str) = devnode.to_str()
+        {
             // Get the device node (e.g., /dev/ttyACM0)
-            if let Some(devnode) = tty_device.devnode() {
-                if let Some(path_str) = devnode.to_str() {
-                    ports.push(path_str.to_string());
-                }
-            }
+            ports.push(path_str.to_string());
         }
     }
 

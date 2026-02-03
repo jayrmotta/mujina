@@ -148,50 +148,50 @@ pub fn run_mining_loop(
                 }
 
                 // Check for high-priority commands periodically (every 1000 hashes)
-                if hashes_computed.is_multiple_of(1000) {
-                    if let Ok(cmd) = cmd_rx.try_recv() {
-                        match cmd {
-                            MinerCommand::ReplaceTask { task, response_tx } => {
-                                cached_merkle_root = compute_merkle_root(&task);
-                                let old = current_task.replace(task);
-                                nonce = 0;
-                                update_status(&status, true, shares_found);
-                                let _ = response_tx.send(Ok(old));
-                                // Continue with new task in next iteration
-                                break;
-                            }
-                            MinerCommand::UpdateTask { task, response_tx } => {
-                                cached_merkle_root = compute_merkle_root(&task);
-                                let old = current_task.replace(task);
-                                nonce = 0;
-                                update_status(&status, true, shares_found);
-                                let _ = response_tx.send(Ok(old));
-                                break;
-                            }
-                            MinerCommand::GoIdle { response_tx } => {
-                                cached_merkle_root = None;
-                                let old = current_task.take();
-                                update_status(&status, false, shares_found);
-                                let _ = response_tx.send(Ok(old));
-                                break;
-                            }
-                            MinerCommand::Shutdown => return,
+                if hashes_computed.is_multiple_of(1000)
+                    && let Ok(cmd) = cmd_rx.try_recv()
+                {
+                    match cmd {
+                        MinerCommand::ReplaceTask { task, response_tx } => {
+                            cached_merkle_root = compute_merkle_root(&task);
+                            let old = current_task.replace(task);
+                            nonce = 0;
+                            update_status(&status, true, shares_found);
+                            let _ = response_tx.send(Ok(old));
+                            // Continue with new task in next iteration
+                            break;
                         }
+                        MinerCommand::UpdateTask { task, response_tx } => {
+                            cached_merkle_root = compute_merkle_root(&task);
+                            let old = current_task.replace(task);
+                            nonce = 0;
+                            update_status(&status, true, shares_found);
+                            let _ = response_tx.send(Ok(old));
+                            break;
+                        }
+                        MinerCommand::GoIdle { response_tx } => {
+                            cached_merkle_root = None;
+                            let old = current_task.take();
+                            update_status(&status, false, shares_found);
+                            let _ = response_tx.send(Ok(old));
+                            break;
+                        }
+                        MinerCommand::Shutdown => return,
                     }
                 }
 
                 // Try this nonce
-                if let (Some(task), Some(merkle_root)) = (&current_task, cached_merkle_root) {
-                    if let Some(share) = try_nonce(task, merkle_root, nonce) {
-                        shares_found += 1;
-                        debug!(
-                            thread = %thread_name,
-                            nonce = %format!("{:#010x}", share.nonce),
-                            "Share found"
-                        );
-                        // Send share via blocking send (we're in std::thread)
-                        let _ = task.share_tx.blocking_send(share);
-                    }
+                if let (Some(task), Some(merkle_root)) = (&current_task, cached_merkle_root)
+                    && let Some(share) = try_nonce(task, merkle_root, nonce)
+                {
+                    shares_found += 1;
+                    debug!(
+                        thread = %thread_name,
+                        nonce = %format!("{:#010x}", share.nonce),
+                        "Share found"
+                    );
+                    // Send share via blocking send (we're in std::thread)
+                    let _ = task.share_tx.blocking_send(share);
                 }
 
                 nonce = nonce.wrapping_add(1);

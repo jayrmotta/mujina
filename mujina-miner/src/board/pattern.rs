@@ -158,38 +158,38 @@ impl BoardPattern {
     /// always match (wildcards).
     pub fn matches(&self, device: &UsbDeviceInfo) -> bool {
         // VID must match if specified
-        if let Match::Specific(vid) = self.vid {
-            if device.vid != vid {
-                return false;
-            }
+        if let Match::Specific(vid) = self.vid
+            && device.vid != vid
+        {
+            return false;
         }
 
         // PID must match if specified
-        if let Match::Specific(pid) = self.pid {
-            if device.pid != pid {
-                return false;
-            }
+        if let Match::Specific(pid) = self.pid
+            && device.pid != pid
+        {
+            return false;
         }
 
         // Manufacturer must match if specified
-        if let Match::Specific(ref matcher) = self.manufacturer {
-            if !matcher.matches(&device.manufacturer) {
-                return false;
-            }
+        if let Match::Specific(ref matcher) = self.manufacturer
+            && !matcher.matches(&device.manufacturer)
+        {
+            return false;
         }
 
         // Product must match if specified
-        if let Match::Specific(ref matcher) = self.product {
-            if !matcher.matches(&device.product) {
-                return false;
-            }
+        if let Match::Specific(ref matcher) = self.product
+            && !matcher.matches(&device.product)
+        {
+            return false;
         }
 
         // Serial pattern must match if specified
-        if let Match::Specific(ref matcher) = self.serial_pattern {
-            if !matcher.matches(&device.serial_number) {
-                return false;
-            }
+        if let Match::Specific(ref matcher) = self.serial_pattern
+            && !matcher.matches(&device.serial_number)
+        {
+            return false;
         }
 
         true

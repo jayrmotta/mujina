@@ -657,14 +657,14 @@ impl BitaxeBoard {
         debug!(count = self.chip_infos.len(), "Discovered chips");
 
         // Verify expected BM1370 chip was found
-        if let Some(first_chip) = self.chip_infos.first() {
-            if first_chip.chip_id != Self::EXPECTED_CHIP_ID {
-                return Err(BoardError::InitializationFailed(format!(
-                    "Wrong chip type for Bitaxe Gamma: expected BM1370 ({:02x}{:02x}), found {:02x}{:02x}",
-                    Self::EXPECTED_CHIP_ID[0], Self::EXPECTED_CHIP_ID[1],
-                    first_chip.chip_id[0], first_chip.chip_id[1]
-                )));
-            }
+        if let Some(first_chip) = self.chip_infos.first()
+            && first_chip.chip_id != Self::EXPECTED_CHIP_ID
+        {
+            return Err(BoardError::InitializationFailed(format!(
+                "Wrong chip type for Bitaxe Gamma: expected BM1370 ({:02x}{:02x}), found {:02x}{:02x}",
+                Self::EXPECTED_CHIP_ID[0], Self::EXPECTED_CHIP_ID[1],
+                first_chip.chip_id[0], first_chip.chip_id[1]
+            )));
         }
 
         // Put chip back in reset

@@ -704,10 +704,10 @@ async fn bm13xx_thread_actor<R, W>(
     W::Error: std::fmt::Debug,
 {
     // Disable ASIC on startup to establish known state
-    if let Some(ref mut asic_enable) = peripherals.asic_enable {
-        if let Err(e) = asic_enable.disable().await {
-            warn!(error = %e, "Failed to disable ASIC on startup");
-        }
+    if let Some(ref mut asic_enable) = peripherals.asic_enable
+        && let Err(e) = asic_enable.disable().await
+    {
+        warn!(error = %e, "Failed to disable ASIC on startup");
     }
 
     let mut chip_initialized = false;

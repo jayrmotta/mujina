@@ -238,17 +238,16 @@ impl I2cAssembler {
             register,
             ..
         } = &self.state
+            && !data.is_empty()
         {
-            if !data.is_empty() {
-                self.transactions.push_back(I2cTransaction {
-                    start_time: *start_time,
-                    address: *address,
-                    is_read: *is_read,
-                    data: data.clone(),
-                    register: *register,
-                    all_acked: *all_acks,
-                });
-            }
+            self.transactions.push_back(I2cTransaction {
+                start_time: *start_time,
+                address: *address,
+                is_read: *is_read,
+                data: data.clone(),
+                register: *register,
+                all_acked: *all_acks,
+            });
         }
         self.state = I2cState::Idle;
     }

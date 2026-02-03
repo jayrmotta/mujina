@@ -136,12 +136,11 @@ pub fn dissect_i2c_operation_with_context(
             }
             I2cDevice::Tps546 => {
                 // Update VOUT_MODE cache if this is a VOUT_MODE operation
-                if reg == pmbus::PmbusCommand::VoutMode.as_u8() {
-                    if let Some(data) = data {
-                        if !data.is_empty() {
-                            contexts.tps546_vout_modes.insert(op.address, data[0]);
-                        }
-                    }
+                if reg == pmbus::PmbusCommand::VoutMode.as_u8()
+                    && let Some(data) = data
+                    && !data.is_empty()
+                {
+                    contexts.tps546_vout_modes.insert(op.address, data[0]);
                 }
 
                 // Format using PMBus value parser

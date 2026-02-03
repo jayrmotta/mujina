@@ -207,10 +207,10 @@ fn main() -> Result<()> {
             }
             CaptureEvent::I2c(i2c_event) => {
                 // Filter by channel if requested
-                if let Some(ref filter) = args.filter_channel {
-                    if !filter.eq_ignore_ascii_case("i2c") {
-                        continue;
-                    }
+                if let Some(ref filter) = args.filter_channel
+                    && !filter.eq_ignore_ascii_case("i2c")
+                {
+                    continue;
                 }
 
                 i2c_assembler.process(&i2c_event);
