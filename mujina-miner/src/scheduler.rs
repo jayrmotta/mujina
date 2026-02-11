@@ -704,17 +704,16 @@ impl Scheduler {
                     self.handle_new_thread(thread, &mut thread_events, &mut share_channels).await;
                 }
 
-                // Periodic status logging and state publishing
+                // Periodic status logging
                 _ = status_interval.tick() => {
                     if first_status_tick {
                         first_status_tick = false;
                     } else {
                         self.stats.log_summary();
                     }
-                    let _ = miner_state_tx.send(self.compute_miner_state());
                 }
 
-                // Periodic hashrate broadcast to sources
+                // Periodic state publishing and hashrate broadcast
                 _ = hashrate_interval.tick() => {
                     if first_hashrate_tick {
                         first_hashrate_tick = false;
@@ -723,6 +722,7 @@ impl Scheduler {
                         let senders = self.hashrate_senders();
                         broadcast_hashrate(senders, hashrate).await;
                     }
+                    let _ = miner_state_tx.send(self.compute_miner_state());
                 }
 
                 // Shutdown

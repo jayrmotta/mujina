@@ -716,12 +716,15 @@ impl BitaxeBoard {
             .expect("state_tx must be present when spawning stats monitor");
 
         let handle = tokio::spawn(async move {
-            const STATS_INTERVAL: Duration = Duration::from_secs(30);
+            const STATS_INTERVAL: Duration = Duration::from_secs(5);
             let mut interval = tokio::time::interval(STATS_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             // Create fan controller for the stats task
             let mut fan_ctrl = Emc2101::new(i2c);
+
+            const LOG_INTERVAL: Duration = Duration::from_secs(30);
+            let mut last_log = tokio::time::Instant::now();
 
             // Discard first tick (fires immediately, ADC readings may not be settled)
             interval.tick().await;
@@ -807,21 +810,24 @@ impl BitaxeBoard {
                     threads: Vec::new(),
                 });
 
-                // -- Log summary --
+                // -- Log summary (throttled) --
 
-                info!(
-                    board = %board_model,
-                    serial = ?board_serial,
-                    asic_temp_c = ?asic_temp,
-                    fan_percent = ?fan_percent,
-                    fan_rpm = ?fan_rpm,
-                    vr_temp_c = ?vr_temp,
-                    power_w = ?power_mw.map(|mw| mw as f32 / 1000.0),
-                    current_a = ?iout_ma.map(|ma| ma as f32 / 1000.0),
-                    vin_v = ?vin_mv.map(|mv| mv as f32 / 1000.0),
-                    vout_v = ?vout_mv.map(|mv| mv as f32 / 1000.0),
-                    "Board status."
-                );
+                if last_log.elapsed() >= LOG_INTERVAL {
+                    last_log = tokio::time::Instant::now();
+                    info!(
+                        board = %board_model,
+                        serial = ?board_serial,
+                        asic_temp_c = ?asic_temp,
+                        fan_percent = ?fan_percent,
+                        fan_rpm = ?fan_rpm,
+                        vr_temp_c = ?vr_temp,
+                        power_w = ?power_mw.map(|mw| mw as f32 / 1000.0),
+                        current_a = ?iout_ma.map(|ma| ma as f32 / 1000.0),
+                        vin_v = ?vin_mv.map(|mv| mv as f32 / 1000.0),
+                        vout_v = ?vout_mv.map(|mv| mv as f32 / 1000.0),
+                        "Board status."
+                    );
+                }
             }
         });
 
