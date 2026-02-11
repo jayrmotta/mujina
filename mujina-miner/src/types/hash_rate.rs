@@ -61,6 +61,12 @@ impl HashRate {
     }
 }
 
+impl From<HashRate> for u64 {
+    fn from(rate: HashRate) -> Self {
+        rate.0
+    }
+}
+
 impl From<HashRate> for f64 {
     fn from(rate: HashRate) -> Self {
         rate.0 as f64
