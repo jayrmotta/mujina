@@ -710,8 +710,8 @@ impl Scheduler {
                         first_status_tick = false;
                     } else {
                         self.stats.log_summary();
-                        let _ = miner_state_tx.send(self.compute_miner_state());
                     }
+                    let _ = miner_state_tx.send(self.compute_miner_state());
                 }
 
                 // Periodic hashrate broadcast to sources
