@@ -93,7 +93,20 @@ pub struct BoardRegistration {
 /// Helper type for async board factory functions
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Type alias for board factory function
+/// Factory function signature for creating a board from USB device info.
+///
+/// The factory is responsible for:
+///
+/// 1. Opening hardware resources (serial ports, etc.)
+/// 2. Creating a `watch::channel<BoardState>` seeded with the board's
+///    identity (model, serial) and storing the sender in the board
+/// 3. Initializing the board hardware
+/// 4. Returning the board and a [`BoardRegistration`] containing the
+///    watch receiver
+///
+/// The backplane calls the factory when a matching USB device is
+/// discovered, then forwards the [`BoardRegistration`] to the API
+/// server.
 pub type BoardFactoryFn =
     fn(
         UsbDeviceInfo,
@@ -127,10 +140,12 @@ inventory::collect!(BoardDescriptor);
 // Virtual board support (CPU miner, test boards, etc.)
 // ---------------------------------------------------------------------------
 
-/// Type alias for virtual board factory function.
+/// Factory function signature for creating a virtual board.
 ///
-/// Unlike USB boards, virtual boards don't receive device info---they're
-/// configured via environment variables or other means.
+/// Same contract as [`BoardFactoryFn`] (create watch channel, seed with
+/// identity, return [`BoardRegistration`]), but virtual boards don't
+/// receive USB device info---they're configured via environment
+/// variables or other means.
 pub type VirtualBoardFactoryFn =
     fn() -> BoxFuture<'static, crate::error::Result<(Box<dyn Board + Send>, BoardRegistration)>>;
 
