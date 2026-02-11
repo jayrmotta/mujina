@@ -4,9 +4,11 @@
 //! Configured via environment variables, creates one HashThread per core.
 
 use async_trait::async_trait;
+use tokio::sync::watch;
 
 use super::{Board, BoardError, BoardInfo, VirtualBoardDescriptor};
 use crate::{
+    api_client::types::BoardState,
     asic::hash_thread::HashThread,
     cpu_miner::{CpuHashThread, CpuMinerConfig},
 };
@@ -22,14 +24,19 @@ pub struct CpuBoard {
 
     /// Threads created by this board (kept for shutdown).
     threads: Vec<CpuHashThread>,
+
+    /// Channel for publishing board state to the API server.
+    #[expect(dead_code, reason = "will publish telemetry in a follow-up commit")]
+    state_tx: watch::Sender<BoardState>,
 }
 
 impl CpuBoard {
     /// Create a new CPU mining board from environment configuration.
-    pub fn new(config: CpuMinerConfig) -> Self {
+    pub fn new(config: CpuMinerConfig, state_tx: watch::Sender<BoardState>) -> Self {
         Self {
             config,
             threads: Vec::new(),
+            state_tx,
         }
     }
 }
@@ -73,12 +80,27 @@ impl Board for CpuBoard {
 // ---------------------------------------------------------------------------
 
 /// Factory function for creating CpuBoard instances.
-async fn create_cpu_board() -> crate::error::Result<Box<dyn Board + Send>> {
+async fn create_cpu_board()
+-> crate::error::Result<(Box<dyn Board + Send>, super::BoardRegistration)> {
     let config = CpuMinerConfig::from_env().ok_or_else(|| {
         crate::error::Error::Config("CPU miner not configured (MUJINA_CPU_MINER not set)".into())
     })?;
 
-    Ok(Box::new(CpuBoard::new(config)))
+    let initial_state = BoardState {
+        model: "CPU Miner".into(),
+        serial: Some(format!(
+            "cpu-{}x{}%",
+            config.thread_count, config.duty_percent
+        )),
+        fans: Vec::new(),
+        temperatures: Vec::new(),
+        threads: Vec::new(),
+    };
+    let (state_tx, state_rx) = watch::channel(initial_state);
+
+    let board = CpuBoard::new(config, state_tx);
+    let registration = super::BoardRegistration { state_rx };
+    Ok((Box::new(board), registration))
 }
 
 inventory::submit! {

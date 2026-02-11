@@ -5,8 +5,11 @@ pub mod pattern;
 
 use async_trait::async_trait;
 use std::{error::Error, fmt, future::Future, pin::Pin};
+use tokio::sync::watch;
 
-use crate::{asic::hash_thread::HashThread, transport::UsbDeviceInfo};
+use crate::{
+    api_client::types::BoardState, asic::hash_thread::HashThread, transport::UsbDeviceInfo,
+};
 
 /// Represents a mining board containing one or more ASIC chips.
 ///
@@ -77,12 +80,24 @@ impl From<std::io::Error> for BoardError {
     }
 }
 
+/// Registration data returned by board factory functions.
+///
+/// Bundles the channels needed for the rest of the system to communicate
+/// with a board. The backplane forwards this to the API server after
+/// creating a board.
+pub struct BoardRegistration {
+    /// Watch receiver for the board's current state.
+    pub state_rx: watch::Receiver<BoardState>,
+}
+
 /// Helper type for async board factory functions
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Type alias for board factory function
 pub type BoardFactoryFn =
-    fn(UsbDeviceInfo) -> BoxFuture<'static, crate::error::Result<Box<dyn Board + Send>>>;
+    fn(
+        UsbDeviceInfo,
+    ) -> BoxFuture<'static, crate::error::Result<(Box<dyn Board + Send>, BoardRegistration)>>;
 
 /// Board descriptor that gets collected by inventory.
 ///
@@ -117,7 +132,7 @@ inventory::collect!(BoardDescriptor);
 /// Unlike USB boards, virtual boards don't receive device info---they're
 /// configured via environment variables or other means.
 pub type VirtualBoardFactoryFn =
-    fn() -> BoxFuture<'static, crate::error::Result<Box<dyn Board + Send>>>;
+    fn() -> BoxFuture<'static, crate::error::Result<(Box<dyn Board + Send>, BoardRegistration)>>;
 
 /// Descriptor for virtual boards (CPU miner, test boards, etc.).
 ///

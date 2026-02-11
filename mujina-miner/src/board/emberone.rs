@@ -6,22 +6,36 @@
 //! This is currently a stub implementation pending full support.
 
 use async_trait::async_trait;
+use tokio::sync::watch;
 
 use super::{
     Board, BoardDescriptor, BoardError, BoardInfo,
     pattern::{BoardPattern, Match, StringMatch},
 };
-use crate::{asic::hash_thread::HashThread, error::Error, transport::UsbDeviceInfo};
+use crate::{
+    api_client::types::BoardState, asic::hash_thread::HashThread, error::Error,
+    transport::UsbDeviceInfo,
+};
 
 /// EmberOne mining board (stub).
 pub struct EmberOne {
     device_info: UsbDeviceInfo,
+
+    /// Channel for publishing board state to the API server.
+    #[expect(dead_code, reason = "will publish telemetry in a follow-up commit")]
+    state_tx: watch::Sender<BoardState>,
 }
 
 impl EmberOne {
     /// Create a new EmberOne board instance.
-    pub fn new(device_info: UsbDeviceInfo) -> Result<Self, BoardError> {
-        Ok(Self { device_info })
+    pub fn new(
+        device_info: UsbDeviceInfo,
+        state_tx: watch::Sender<BoardState>,
+    ) -> Result<Self, BoardError> {
+        Ok(Self {
+            device_info,
+            state_tx,
+        })
     }
 }
 
@@ -48,11 +62,23 @@ impl Board for EmberOne {
 }
 
 // Factory function to create EmberOne board from USB device info
-async fn create_from_usb(device: UsbDeviceInfo) -> crate::error::Result<Box<dyn Board + Send>> {
-    let board = EmberOne::new(device)
+async fn create_from_usb(
+    device: UsbDeviceInfo,
+) -> crate::error::Result<(Box<dyn Board + Send>, super::BoardRegistration)> {
+    let initial_state = BoardState {
+        model: "EmberOne".into(),
+        serial: device.serial_number.clone(),
+        fans: Vec::new(),
+        temperatures: Vec::new(),
+        threads: Vec::new(),
+    };
+    let (state_tx, state_rx) = watch::channel(initial_state);
+
+    let board = EmberOne::new(device, state_tx)
         .map_err(|e| Error::Hardware(format!("Failed to create board: {}", e)))?;
 
-    Ok(Box::new(board))
+    let registration = super::BoardRegistration { state_rx };
+    Ok((Box::new(board), registration))
 }
 
 // Register this board type with the inventory system
@@ -85,7 +111,15 @@ mod tests {
             "/sys/devices/test".to_string(),
         );
 
-        let board = EmberOne::new(device);
+        let (state_tx, _state_rx) = watch::channel(BoardState {
+            model: "EmberOne".into(),
+            serial: device.serial_number.clone(),
+            fans: Vec::new(),
+            temperatures: Vec::new(),
+            threads: Vec::new(),
+        });
+
+        let board = EmberOne::new(device, state_tx);
         assert!(board.is_ok());
 
         let board = board.unwrap();

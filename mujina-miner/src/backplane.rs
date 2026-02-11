@@ -7,7 +7,7 @@
 
 use crate::{
     asic::hash_thread::HashThread,
-    board::{Board, BoardDescriptor, VirtualBoardRegistry},
+    board::{Board, BoardDescriptor, BoardRegistration, VirtualBoardRegistry},
     error::Result,
     tracing::prelude::*,
     transport::{
@@ -49,6 +49,8 @@ pub struct Backplane {
     event_rx: mpsc::Receiver<TransportEvent>,
     /// Channel to send hash threads to the scheduler
     scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
+    /// Channel to forward board registrations to the API server
+    board_reg_tx: mpsc::Sender<BoardRegistration>,
 }
 
 impl Backplane {
@@ -56,6 +58,7 @@ impl Backplane {
     pub fn new(
         event_rx: mpsc::Receiver<TransportEvent>,
         scheduler_tx: mpsc::Sender<Box<dyn HashThread>>,
+        board_reg_tx: mpsc::Sender<BoardRegistration>,
     ) -> Self {
         Self {
             registry: BoardRegistry,
@@ -63,6 +66,7 @@ impl Backplane {
             boards: HashMap::new(),
             event_rx,
             scheduler_tx,
+            board_reg_tx,
         }
     }
 
@@ -130,8 +134,8 @@ impl Backplane {
                 );
 
                 // Create the board using the descriptor's factory function
-                let mut board = match (descriptor.create_fn)(device_info).await {
-                    Ok(board) => board,
+                let (mut board, registration) = match (descriptor.create_fn)(device_info).await {
+                    Ok(result) => result,
                     Err(e) => {
                         error!(
                             board = descriptor.name,
@@ -147,6 +151,15 @@ impl Backplane {
                     .serial_number
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string());
+
+                // Forward board registration to the API server
+                if let Err(e) = self.board_reg_tx.send(registration).await {
+                    error!(
+                        board = %board_info.model,
+                        error = %e,
+                        "Failed to register board with API server"
+                    );
+                }
 
                 // Create hash threads from the board
                 match board.create_hash_threads().await {
@@ -232,8 +245,8 @@ impl Backplane {
                 );
 
                 // Create the board using the descriptor's factory function
-                let mut board = match (descriptor.create_fn)().await {
-                    Ok(board) => board,
+                let (mut board, registration) = match (descriptor.create_fn)().await {
+                    Ok(result) => result,
                     Err(e) => {
                         error!(
                             board = descriptor.name,
@@ -246,6 +259,15 @@ impl Backplane {
 
                 let board_info = board.board_info();
                 let board_id = device_info.device_id.clone();
+
+                // Forward board registration to the API server
+                if let Err(e) = self.board_reg_tx.send(registration).await {
+                    error!(
+                        board = %board_info.model,
+                        error = %e,
+                        "Failed to register board with API server"
+                    );
+                }
 
                 // Create hash threads from the board
                 match board.create_hash_threads().await {

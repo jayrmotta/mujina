@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, info, warn};
 
-use crate::api_client::types::{BoardState, MinerState};
+use crate::api_client::types::MinerState;
+use crate::board::BoardRegistration;
 
 /// API server configuration.
 #[derive(Debug, Clone)]
@@ -37,19 +38,19 @@ impl Default for ApiConfig {
     }
 }
 
-/// Dynamic collection of board watch receivers.
+/// Dynamic collection of board registrations.
 ///
-/// Boards register by sending a `watch::Receiver<BoardState>` through the
+/// Boards register by sending a `BoardRegistration` through the
 /// registration channel. The registry drains new registrations and cleans
 /// up disconnected boards lazily when accessed.
 pub struct BoardRegistry {
-    reg_rx: mpsc::Receiver<watch::Receiver<BoardState>>,
-    boards: Vec<watch::Receiver<BoardState>>,
+    reg_rx: mpsc::Receiver<BoardRegistration>,
+    boards: Vec<BoardRegistration>,
 }
 
 impl BoardRegistry {
     /// Create a new registry from a registration channel receiver.
-    pub fn new(reg_rx: mpsc::Receiver<watch::Receiver<BoardState>>) -> Self {
+    pub fn new(reg_rx: mpsc::Receiver<BoardRegistration>) -> Self {
         Self {
             reg_rx,
             boards: Vec::new(),
@@ -60,12 +61,15 @@ impl BoardRegistry {
     ///
     /// Drains pending registrations, removes boards whose sender has been
     /// dropped (board disconnected), and returns the current state of each.
-    pub fn boards(&mut self) -> Vec<BoardState> {
-        while let Ok(rx) = self.reg_rx.try_recv() {
-            self.boards.push(rx);
+    pub fn boards(&mut self) -> Vec<crate::api_client::types::BoardState> {
+        while let Ok(reg) = self.reg_rx.try_recv() {
+            self.boards.push(reg);
         }
-        self.boards.retain(|rx| rx.has_changed().is_ok());
-        self.boards.iter().map(|rx| rx.borrow().clone()).collect()
+        self.boards.retain(|reg| reg.state_rx.has_changed().is_ok());
+        self.boards
+            .iter()
+            .map(|reg| reg.state_rx.borrow().clone())
+            .collect()
     }
 }
 
@@ -82,14 +86,14 @@ pub(crate) struct SharedState {
 /// cancellation token is triggered. It binds to localhost only by default for
 /// security.
 ///
-/// Board watch receivers arrive via `board_reg_rx` as boards connect. The
+/// Board registrations arrive via `board_reg_rx` as boards connect. The
 /// server manages the collection internally and cleans up when boards
 /// disconnect.
 pub async fn serve(
     config: ApiConfig,
     shutdown: CancellationToken,
     miner_state_rx: watch::Receiver<MinerState>,
-    board_reg_rx: mpsc::Receiver<watch::Receiver<BoardState>>,
+    board_reg_rx: mpsc::Receiver<BoardRegistration>,
 ) -> Result<()> {
     let app = build_router(miner_state_rx, board_reg_rx);
 
@@ -120,7 +124,7 @@ pub async fn serve(
 /// Build the application router with all API routes.
 fn build_router(
     miner_state_rx: watch::Receiver<MinerState>,
-    board_reg_rx: mpsc::Receiver<watch::Receiver<BoardState>>,
+    board_reg_rx: mpsc::Receiver<BoardRegistration>,
 ) -> Router {
     let state = SharedState {
         miner_state_rx,

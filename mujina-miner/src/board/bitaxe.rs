@@ -15,6 +15,7 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::{
+    api_client::types::BoardState,
     asic::{
         ChipInfo,
         bm13xx::{self, BM13xxProtocol, protocol::Command, thread::BM13xxThread},
@@ -140,6 +141,9 @@ pub struct BitaxeBoard {
     stats_task_handle: Option<tokio::task::JoinHandle<()>>,
     /// Serial number from USB device info
     serial_number: Option<String>,
+    /// Channel for publishing board state to the API server.
+    #[expect(dead_code, reason = "will publish telemetry in a follow-up commit")]
+    state_tx: watch::Sender<BoardState>,
 }
 
 impl BitaxeBoard {
@@ -170,6 +174,7 @@ impl BitaxeBoard {
         control: tokio_serial::SerialStream,
         data_path: &str,
         serial_number: Option<String>,
+        state_tx: watch::Sender<BoardState>,
     ) -> Result<Self, BoardError> {
         // Create control channel and I2C controller
         let control_channel = ControlChannel::new(control);
@@ -197,6 +202,7 @@ impl BitaxeBoard {
             thread_shutdown: None,
             stats_task_handle: None,
             serial_number,
+            state_tx,
         })
     }
 
@@ -916,7 +922,7 @@ impl Board for BitaxeBoard {
 // Factory function to create a Bitaxe board from USB device info
 async fn create_from_usb(
     device: crate::transport::UsbDeviceInfo,
-) -> crate::error::Result<Box<dyn Board + Send>> {
+) -> crate::error::Result<(Box<dyn Board + Send>, super::BoardRegistration)> {
     use tokio_serial::SerialPortBuilderExt;
 
     // Get serial ports
@@ -940,9 +946,24 @@ async fn create_from_usb(
     // Open control port at 115200 baud
     let control_port = tokio_serial::new(&serial_ports[0], 115200).open_native_async()?;
 
+    // Create watch channel for board state, seeded with identity
+    let initial_state = BoardState {
+        model: "Bitaxe Gamma".into(),
+        serial: device.serial_number.clone(),
+        fans: Vec::new(),
+        temperatures: Vec::new(),
+        threads: Vec::new(),
+    };
+    let (state_tx, state_rx) = watch::channel(initial_state);
+
     // Create the board with the control port and data port path
-    let mut board = BitaxeBoard::new(control_port, &serial_ports[1], device.serial_number.clone())
-        .map_err(|e| crate::error::Error::Hardware(format!("Failed to create board: {}", e)))?;
+    let mut board = BitaxeBoard::new(
+        control_port,
+        &serial_ports[1],
+        device.serial_number.clone(),
+        state_tx,
+    )
+    .map_err(|e| crate::error::Error::Hardware(format!("Failed to create board: {}", e)))?;
 
     // Initialize the board (reset, discover chips, start event monitoring)
     board
@@ -955,7 +976,8 @@ async fn create_from_usb(
         board.chip_count()
     );
 
-    Ok(Box::new(board))
+    let registration = super::BoardRegistration { state_rx };
+    Ok((Box::new(board), registration))
 }
 
 // Register this board type with the inventory system
