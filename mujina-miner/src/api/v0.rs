@@ -14,7 +14,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/health", get(health))
         .route("/miner", get(get_miner))
         .route("/boards", get(get_boards))
-        .route("/boards/:name", get(get_board))
+        .route("/boards/{name}", get(get_board))
 }
 
 /// Health check endpoint.
