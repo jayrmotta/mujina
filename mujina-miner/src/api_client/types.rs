@@ -19,8 +19,27 @@ pub struct MinerState {
 /// Board status.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BoardState {
-    pub name: String,
+    pub model: String,
+    pub serial: Option<String>,
+    pub fans: Vec<Fan>,
+    pub temperatures: Vec<TemperatureSensor>,
     pub threads: Vec<ThreadState>,
+}
+
+/// Fan status.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Fan {
+    pub label: String,
+    pub rpm: u32,
+    pub percent: u8,
+    pub target_percent: u8,
+}
+
+/// Temperature sensor reading.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TemperatureSensor {
+    pub label: String,
+    pub temperature_c: f32,
 }
 
 /// Per-thread runtime status.

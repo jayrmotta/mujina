@@ -67,7 +67,7 @@ async fn cmd_status() -> Result<()> {
     if !state.boards.is_empty() {
         println!("Boards:");
         for board in &state.boards {
-            println!("  - {}", board.name);
+            println!("  - {}", board.model);
         }
     }
 
