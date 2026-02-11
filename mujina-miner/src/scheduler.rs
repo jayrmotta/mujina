@@ -33,11 +33,13 @@ use slotmap::SlotMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
 use tokio_util::sync::CancellationToken;
 
+use crate::api_client::types::MinerState;
 use crate::asic::hash_thread::{HashTask, HashThread, HashThreadEvent, Share};
 use crate::job_source::{
     JobTemplate, MerkleRootKind, Share as SourceShare, SourceCommand, SourceEvent,
@@ -761,6 +763,7 @@ pub async fn task(
     running: CancellationToken,
     thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
     source_reg_rx: mpsc::Receiver<SourceRegistration>,
+    _miner_state_tx: watch::Sender<MinerState>,
 ) {
     let mut scheduler = Scheduler::new();
     scheduler.run(running, thread_rx, source_reg_rx).await;

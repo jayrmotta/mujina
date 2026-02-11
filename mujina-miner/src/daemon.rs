@@ -6,9 +6,10 @@
 use std::env;
 
 use tokio::signal::unix::{self, SignalKind};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use crate::api_client::types::MinerState;
 use crate::tracing::prelude::*;
 use crate::{
     api::{self, ApiConfig},
@@ -218,11 +219,15 @@ impl Daemon {
             });
         }
 
+        // Miner state channel: scheduler publishes snapshots, API serves them.
+        let (miner_state_tx, miner_state_rx) = watch::channel(MinerState::default());
+
         // Start the scheduler
         self.tracker.spawn(scheduler::task(
             self.shutdown.clone(),
             thread_rx,
             source_reg_rx,
+            miner_state_tx,
         ));
 
         // Start the API server
@@ -230,7 +235,7 @@ impl Daemon {
             let shutdown = self.shutdown.clone();
             async move {
                 let config = ApiConfig::default();
-                if let Err(e) = api::serve(config, shutdown).await {
+                if let Err(e) = api::serve(config, shutdown, miner_state_rx).await {
                     error!("API server error: {}", e);
                 }
             }

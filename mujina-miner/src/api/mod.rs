@@ -12,9 +12,12 @@ mod v0;
 use anyhow::Result;
 use axum::Router;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, info, warn};
+
+use crate::api_client::types::MinerState;
 
 /// API server configuration.
 #[derive(Debug, Clone)]
@@ -37,7 +40,11 @@ impl Default for ApiConfig {
 /// This function starts the HTTP API server and runs until the provided
 /// cancellation token is triggered. It binds to localhost only by default for
 /// security.
-pub async fn serve(config: ApiConfig, shutdown: CancellationToken) -> Result<()> {
+pub async fn serve(
+    config: ApiConfig,
+    shutdown: CancellationToken,
+    _miner_state_rx: watch::Receiver<MinerState>,
+) -> Result<()> {
     let app = build_router();
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
