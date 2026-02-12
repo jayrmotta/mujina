@@ -126,28 +126,35 @@ mod tests {
     use crate::api_client::types::{BoardState, SourceState};
     use crate::board::BoardRegistration;
 
-    /// Build a router with pre-registered boards. Returns the router and
-    /// a vec of watch senders (must be kept alive for the boards to remain
-    /// connected).
-    fn router_with_boards(
-        miner_state: MinerState,
-        board_states: Vec<BoardState>,
-    ) -> (Router, Vec<watch::Sender<BoardState>>) {
-        let (_miner_tx, miner_rx) = watch::channel(miner_state);
-        let (cmd_tx, _cmd_rx) = mpsc::channel::<SchedulerCommand>(16);
+    /// Test fixtures returned by the router builder.
+    struct TestFixtures {
+        router: Router,
+        /// Keep alive to prevent board watch channels from closing.
+        _board_senders: Vec<watch::Sender<BoardState>>,
+        /// Publish updated miner state (e.g. after handling a command).
+        _miner_tx: watch::Sender<MinerState>,
+        /// Receives commands sent by PATCH handlers.
+        _cmd_rx: mpsc::Receiver<SchedulerCommand>,
+    }
+
+    fn build_test_router(miner_state: MinerState, board_states: Vec<BoardState>) -> TestFixtures {
+        let (miner_tx, miner_rx) = watch::channel(miner_state);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<SchedulerCommand>(16);
 
         let mut registry = BoardRegistry::new();
-        let mut senders = Vec::new();
+        let mut board_senders = Vec::new();
         for state in board_states {
             let (tx, rx) = watch::channel(state);
             registry.push(BoardRegistration { state_rx: rx });
-            senders.push(tx);
+            board_senders.push(tx);
         }
 
-        (
-            build_router(miner_rx, Arc::new(Mutex::new(registry)), cmd_tx),
-            senders,
-        )
+        TestFixtures {
+            router: build_router(miner_rx, Arc::new(Mutex::new(registry)), cmd_tx),
+            _board_senders: board_senders,
+            _miner_tx: miner_tx,
+            _cmd_rx: cmd_rx,
+        }
     }
 
     async fn get(app: Router, uri: &str) -> (http::StatusCode, String) {
@@ -163,8 +170,8 @@ mod tests {
 
     #[tokio::test]
     async fn health_returns_ok() {
-        let (app, _keep) = router_with_boards(MinerState::default(), vec![]);
-        let (status, body) = get(app.clone(), "/api/v0/health").await;
+        let fixtures = build_test_router(MinerState::default(), vec![]);
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/health").await;
         assert_eq!(status, 200);
         assert_eq!(body, "OK");
     }
@@ -186,9 +193,9 @@ mod tests {
             model: "TestModel".into(),
             ..Default::default()
         };
-        let (app, _keep) = router_with_boards(miner_state, vec![board]);
+        let fixtures = build_test_router(miner_state, vec![board]);
 
-        let (status, body) = get(app.clone(), "/api/v0/miner").await;
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/miner").await;
         assert_eq!(status, 200);
 
         let state: MinerState = serde_json::from_str(&body).unwrap();
@@ -215,9 +222,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (app, _keep) = router_with_boards(MinerState::default(), boards);
+        let fixtures = build_test_router(MinerState::default(), boards);
 
-        let (status, body) = get(app.clone(), "/api/v0/boards").await;
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/boards").await;
         assert_eq!(status, 200);
 
         let boards: Vec<BoardState> = serde_json::from_str(&body).unwrap();
@@ -234,9 +241,9 @@ mod tests {
             serial: Some("abc123".into()),
             ..Default::default()
         };
-        let (app, _keep) = router_with_boards(MinerState::default(), vec![board]);
+        let fixtures = build_test_router(MinerState::default(), vec![board]);
 
-        let (status, body) = get(app.clone(), "/api/v0/boards/bitaxe-abc123").await;
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/boards/bitaxe-abc123").await;
         assert_eq!(status, 200);
 
         let board: BoardState = serde_json::from_str(&body).unwrap();
@@ -246,8 +253,8 @@ mod tests {
 
     #[tokio::test]
     async fn board_by_name_returns_404_when_missing() {
-        let (app, _keep) = router_with_boards(MinerState::default(), vec![]);
-        let (status, _body) = get(app.clone(), "/api/v0/boards/nonexistent").await;
+        let fixtures = build_test_router(MinerState::default(), vec![]);
+        let (status, _body) = get(fixtures.router.clone(), "/api/v0/boards/nonexistent").await;
         assert_eq!(status, 404);
     }
 
@@ -266,9 +273,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (app, _keep) = router_with_boards(miner_state, vec![]);
+        let fixtures = build_test_router(miner_state, vec![]);
 
-        let (status, body) = get(app.clone(), "/api/v0/sources").await;
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/sources").await;
         assert_eq!(status, 200);
 
         let sources: Vec<SourceState> = serde_json::from_str(&body).unwrap();
@@ -288,9 +295,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (app, _keep) = router_with_boards(miner_state, vec![]);
+        let fixtures = build_test_router(miner_state, vec![]);
 
-        let (status, body) = get(app.clone(), "/api/v0/sources/my-pool").await;
+        let (status, body) = get(fixtures.router.clone(), "/api/v0/sources/my-pool").await;
         assert_eq!(status, 200);
 
         let source: SourceState = serde_json::from_str(&body).unwrap();
@@ -300,15 +307,15 @@ mod tests {
 
     #[tokio::test]
     async fn source_by_name_returns_404_when_missing() {
-        let (app, _keep) = router_with_boards(MinerState::default(), vec![]);
-        let (status, _body) = get(app.clone(), "/api/v0/sources/nonexistent").await;
+        let fixtures = build_test_router(MinerState::default(), vec![]);
+        let (status, _body) = get(fixtures.router.clone(), "/api/v0/sources/nonexistent").await;
         assert_eq!(status, 404);
     }
 
     #[tokio::test]
     async fn unknown_route_returns_404() {
-        let (app, _keep) = router_with_boards(MinerState::default(), vec![]);
-        let (status, _body) = get(app.clone(), "/api/v0/nope").await;
+        let fixtures = build_test_router(MinerState::default(), vec![]);
+        let (status, _body) = get(fixtures.router.clone(), "/api/v0/nope").await;
         assert_eq!(status, 404);
     }
 }
