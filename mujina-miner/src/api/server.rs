@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, info, warn};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 
 use super::{commands::SchedulerCommand, registry::BoardRegistry, v0};
 use crate::api_client::types::MinerState;
@@ -119,14 +121,18 @@ pub(crate) fn build_router(
         scheduler_cmd_tx,
     };
 
-    Router::new()
+    let (router, api) = OpenApiRouter::new()
         .nest("/api/v0", v0::routes())
+        .with_state(state)
+        .split_for_parts();
+
+    router
+        .merge(SwaggerUi::new("/swagger-ui").url("/api/v0/openapi.json", api))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::TRACE))
                 .on_response(DefaultOnResponse::new().level(Level::TRACE)),
         )
-        .with_state(state)
 }
 
 #[cfg(test)]

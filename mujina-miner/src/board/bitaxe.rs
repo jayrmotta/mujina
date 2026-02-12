@@ -781,7 +781,7 @@ impl BitaxeBoard {
                         name: "fan".into(),
                         rpm: fan_rpm,
                         percent: fan_percent,
-                        target_percent: Some(100),
+                        target_percent: None,
                     }],
                     temperatures: vec![
                         TemperatureSensor {

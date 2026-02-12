@@ -4,41 +4,67 @@
 //! until the miner reaches 1.0.
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    routing::get,
 };
 use std::time::Duration;
 
 use tokio::sync::oneshot;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use super::commands::SchedulerCommand;
 use super::server::SharedState;
 use crate::api_client::types::{BoardState, MinerPatchRequest, MinerState, SourceState};
 
-/// Build the v0 API routes.
-pub fn routes() -> Router<SharedState> {
-    Router::new()
-        .route("/health", get(health))
-        .route("/miner", get(get_miner).patch(patch_miner))
-        .route("/boards", get(get_boards))
-        .route("/boards/{name}", get(get_board))
-        .route("/sources", get(get_sources))
-        .route("/sources/{name}", get(get_source))
+/// Build the v0 API routes with OpenAPI metadata.
+pub fn routes() -> OpenApiRouter<SharedState> {
+    OpenApiRouter::new()
+        .routes(routes!(health))
+        .routes(routes!(get_miner, patch_miner))
+        .routes(routes!(get_boards))
+        .routes(routes!(get_board))
+        .routes(routes!(get_sources))
+        .routes(routes!(get_source))
 }
 
 /// Health check endpoint.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses(
+        (status = OK, description = "Server is running", body = String),
+    ),
+)]
 async fn health() -> &'static str {
     "OK"
 }
 
 /// Return the current miner state snapshot.
+#[utoipa::path(
+    get,
+    path = "/miner",
+    tag = "miner",
+    responses(
+        (status = OK, description = "Current miner state", body = MinerState),
+    ),
+)]
 async fn get_miner(State(state): State<SharedState>) -> Json<MinerState> {
     Json(state.miner_state())
 }
 
 /// Apply partial updates to the miner configuration.
+#[utoipa::path(
+    patch,
+    path = "/miner",
+    tag = "miner",
+    request_body = MinerPatchRequest,
+    responses(
+        (status = OK, description = "Updated miner state", body = MinerState),
+        (status = INTERNAL_SERVER_ERROR, description = "Command channel error"),
+    ),
+)]
 async fn patch_miner(
     State(state): State<SharedState>,
     Json(req): Json<MinerPatchRequest>,
@@ -65,6 +91,14 @@ async fn patch_miner(
 }
 
 /// Return all connected boards.
+#[utoipa::path(
+    get,
+    path = "/boards",
+    tag = "boards",
+    responses(
+        (status = OK, description = "List of connected boards", body = Vec<BoardState>),
+    ),
+)]
 async fn get_boards(State(state): State<SharedState>) -> Json<Vec<BoardState>> {
     Json(
         state
@@ -76,6 +110,18 @@ async fn get_boards(State(state): State<SharedState>) -> Json<Vec<BoardState>> {
 }
 
 /// Return a single board by name, or 404 if not found.
+#[utoipa::path(
+    get,
+    path = "/boards/{name}",
+    tag = "boards",
+    params(
+        ("name" = String, Path, description = "Board name"),
+    ),
+    responses(
+        (status = OK, description = "Board details", body = BoardState),
+        (status = NOT_FOUND, description = "Board not found"),
+    ),
+)]
 async fn get_board(
     State(state): State<SharedState>,
     Path(name): Path<String>,
@@ -92,11 +138,31 @@ async fn get_board(
 }
 
 /// Return all registered job sources.
+#[utoipa::path(
+    get,
+    path = "/sources",
+    tag = "sources",
+    responses(
+        (status = OK, description = "List of job sources", body = Vec<SourceState>),
+    ),
+)]
 async fn get_sources(State(state): State<SharedState>) -> Json<Vec<SourceState>> {
     Json(state.miner_state().sources)
 }
 
 /// Return a single source by name, or 404 if not found.
+#[utoipa::path(
+    get,
+    path = "/sources/{name}",
+    tag = "sources",
+    params(
+        ("name" = String, Path, description = "Source name"),
+    ),
+    responses(
+        (status = OK, description = "Source details", body = SourceState),
+        (status = NOT_FOUND, description = "Source not found"),
+    ),
+)]
 async fn get_source(
     State(state): State<SharedState>,
     Path(name): Path<String>,

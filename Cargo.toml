@@ -46,3 +46,5 @@ slotmap = "1.0"
 tokio-udev = "0.10"
 udev = "0.9"
 utoipa = "5.4"
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
