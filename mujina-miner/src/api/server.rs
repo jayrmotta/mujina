@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{Level, info, warn};
 
-use super::{registry::BoardRegistry, v0};
+use super::{commands::SchedulerCommand, registry::BoardRegistry, v0};
 use crate::api_client::types::MinerState;
 use crate::board::BoardRegistration;
 
@@ -35,6 +35,7 @@ impl Default for ApiConfig {
 pub(crate) struct SharedState {
     pub miner_state_rx: watch::Receiver<MinerState>,
     pub board_registry: Arc<Mutex<BoardRegistry>>,
+    pub scheduler_cmd_tx: mpsc::Sender<SchedulerCommand>,
 }
 
 /// Start the API server.
@@ -51,6 +52,7 @@ pub async fn serve(
     shutdown: CancellationToken,
     miner_state_rx: watch::Receiver<MinerState>,
     mut board_reg_rx: mpsc::Receiver<BoardRegistration>,
+    scheduler_cmd_tx: mpsc::Sender<SchedulerCommand>,
 ) -> Result<()> {
     let board_registry = Arc::new(Mutex::new(BoardRegistry::new()));
 
@@ -65,7 +67,7 @@ pub async fn serve(
         }
     });
 
-    let app = build_router(miner_state_rx, board_registry);
+    let app = build_router(miner_state_rx, board_registry, scheduler_cmd_tx);
 
     let listener = TcpListener::bind(&config.bind_addr).await?;
     let actual_addr = listener.local_addr()?;
@@ -95,10 +97,12 @@ pub async fn serve(
 pub(crate) fn build_router(
     miner_state_rx: watch::Receiver<MinerState>,
     board_registry: Arc<Mutex<BoardRegistry>>,
+    scheduler_cmd_tx: mpsc::Sender<SchedulerCommand>,
 ) -> Router {
     let state = SharedState {
         miner_state_rx,
         board_registry,
+        scheduler_cmd_tx,
     };
 
     Router::new()
@@ -118,6 +122,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::api::commands::SchedulerCommand;
     use crate::api_client::types::{BoardState, SourceState};
     use crate::board::BoardRegistration;
 
@@ -129,6 +134,7 @@ mod tests {
         board_states: Vec<BoardState>,
     ) -> (Router, Vec<watch::Sender<BoardState>>) {
         let (_miner_tx, miner_rx) = watch::channel(miner_state);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<SchedulerCommand>(16);
 
         let mut registry = BoardRegistry::new();
         let mut senders = Vec::new();
@@ -139,7 +145,7 @@ mod tests {
         }
 
         (
-            build_router(miner_rx, Arc::new(Mutex::new(registry))),
+            build_router(miner_rx, Arc::new(Mutex::new(registry)), cmd_tx),
             senders,
         )
     }

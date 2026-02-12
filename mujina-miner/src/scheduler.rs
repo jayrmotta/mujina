@@ -39,6 +39,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
 use tokio_util::sync::CancellationToken;
 
+use crate::api::commands::SchedulerCommand;
 use crate::api_client::types::{MinerState, SourceState};
 use crate::asic::hash_thread::{HashTask, HashThread, HashThreadEvent, Share};
 use crate::job_source::{
@@ -626,6 +627,20 @@ impl Scheduler {
         self.difficulty_warned_sources.clear();
     }
 
+    /// Handle an API command, sending the result back on the reply channel.
+    fn handle_api_command(&mut self, cmd: SchedulerCommand) {
+        match cmd {
+            SchedulerCommand::PauseMining { reply } => {
+                debug!("API: PauseMining (not yet implemented)");
+                let _ = reply.send(Err(anyhow::anyhow!("not yet implemented")));
+            }
+            SchedulerCommand::ResumeMining { reply } => {
+                debug!("API: ResumeMining (not yet implemented)");
+                let _ = reply.send(Err(anyhow::anyhow!("not yet implemented")));
+            }
+        }
+    }
+
     /// Main scheduler loop.
     async fn run(
         &mut self,
@@ -633,6 +648,7 @@ impl Scheduler {
         mut thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
         mut source_reg_rx: mpsc::Receiver<SourceRegistration>,
         miner_state_tx: watch::Sender<MinerState>,
+        mut cmd_rx: mpsc::Receiver<SchedulerCommand>,
     ) {
         // StreamMaps as locals (not in self) to avoid borrow conflicts in select!
         let mut source_events: SourceEventStream = StreamMap::new();
@@ -721,6 +737,11 @@ impl Scheduler {
                     }
                 }
 
+                // API commands
+                Some(cmd) = cmd_rx.recv() => {
+                    self.handle_api_command(cmd);
+                }
+
                 // Periodic state publishing and hashrate broadcast
                 _ = hashrate_interval.tick() => {
                     if first_hashrate_tick {
@@ -799,10 +820,11 @@ pub async fn task(
     thread_rx: mpsc::Receiver<Box<dyn HashThread>>,
     source_reg_rx: mpsc::Receiver<SourceRegistration>,
     miner_state_tx: watch::Sender<MinerState>,
+    cmd_rx: mpsc::Receiver<SchedulerCommand>,
 ) {
     let mut scheduler = Scheduler::new();
     scheduler
-        .run(running, thread_rx, source_reg_rx, miner_state_tx)
+        .run(running, thread_rx, source_reg_rx, miner_state_tx, cmd_rx)
         .await;
 }
 

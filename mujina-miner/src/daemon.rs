@@ -12,7 +12,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::api_client::types::MinerState;
 use crate::tracing::prelude::*;
 use crate::{
-    api::{self, ApiConfig},
+    api::{self, ApiConfig, commands::SchedulerCommand},
     asic::hash_thread::HashThread,
     backplane::Backplane,
     cpu_miner::CpuMinerConfig,
@@ -229,12 +229,16 @@ impl Daemon {
         // Miner state channel: scheduler publishes snapshots, API serves them.
         let (miner_state_tx, miner_state_rx) = watch::channel(MinerState::default());
 
+        // Command channel: API sends commands, scheduler processes them.
+        let (scheduler_cmd_tx, scheduler_cmd_rx) = mpsc::channel::<SchedulerCommand>(16);
+
         // Start the scheduler
         self.tracker.spawn(scheduler::task(
             self.shutdown.clone(),
             thread_rx,
             source_reg_rx,
             miner_state_tx,
+            scheduler_cmd_rx,
         ));
 
         // Start the API server
@@ -242,7 +246,15 @@ impl Daemon {
             let shutdown = self.shutdown.clone();
             async move {
                 let config = ApiConfig::default();
-                if let Err(e) = api::serve(config, shutdown, miner_state_rx, board_reg_rx).await {
+                if let Err(e) = api::serve(
+                    config,
+                    shutdown,
+                    miner_state_rx,
+                    board_reg_rx,
+                    scheduler_cmd_tx,
+                )
+                .await
+                {
                     error!("API server error: {}", e);
                 }
             }
