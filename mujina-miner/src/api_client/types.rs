@@ -66,6 +66,13 @@ pub struct ThreadState {
     pub is_active: bool,
 }
 
+/// Request body for setting a fan's target duty cycle.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SetFanTargetRequest {
+    /// Target duty cycle percentage (0--100), or null for automatic control.
+    pub target_percent: Option<u8>,
+}
+
 /// Job source status.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SourceState {
