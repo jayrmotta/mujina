@@ -158,6 +158,9 @@ struct Scheduler {
 
     /// Track thread count for disconnect detection
     last_thread_count: usize,
+
+    /// Mining paused
+    paused: bool,
 }
 
 impl Scheduler {
@@ -169,6 +172,7 @@ impl Scheduler {
             stats: MiningStats::default(),
             difficulty_warned_sources: HashSet::new(),
             last_thread_count: 0,
+            paused: false,
         }
     }
 
@@ -214,6 +218,7 @@ impl Scheduler {
             uptime_secs: self.stats.start_time.elapsed().as_secs(),
             hashrate: u64::from(self.measured_hashrate()),
             shares_submitted: self.stats.shares_submitted,
+            paused: self.paused,
             boards: vec![],
             sources: self
                 .sources
@@ -628,15 +633,26 @@ impl Scheduler {
     }
 
     /// Handle an API command, sending the result back on the reply channel.
-    fn handle_api_command(&mut self, cmd: SchedulerCommand) {
+    ///
+    /// Publishes an updated state snapshot before replying so the API
+    /// handler's subsequent `borrow()` sees the new value.
+    fn handle_api_command(
+        &mut self,
+        cmd: SchedulerCommand,
+        miner_state_tx: &watch::Sender<MinerState>,
+    ) {
         match cmd {
             SchedulerCommand::PauseMining { reply } => {
-                debug!("API: PauseMining (not yet implemented)");
-                let _ = reply.send(Err(anyhow::anyhow!("not yet implemented")));
+                self.paused = true;
+                warn!("Mining paused via API (not yet implemented)");
+                let _ = miner_state_tx.send(self.compute_miner_state());
+                let _ = reply.send(Ok(()));
             }
             SchedulerCommand::ResumeMining { reply } => {
-                debug!("API: ResumeMining (not yet implemented)");
-                let _ = reply.send(Err(anyhow::anyhow!("not yet implemented")));
+                self.paused = false;
+                warn!("Mining resumed via API (not yet implemented)");
+                let _ = miner_state_tx.send(self.compute_miner_state());
+                let _ = reply.send(Ok(()));
             }
         }
     }
@@ -739,7 +755,7 @@ impl Scheduler {
 
                 // API commands
                 Some(cmd) = cmd_rx.recv() => {
-                    self.handle_api_command(cmd);
+                    self.handle_api_command(cmd, &miner_state_tx);
                 }
 
                 // Periodic state publishing and hashrate broadcast

@@ -12,6 +12,7 @@ pub struct MinerState {
     /// Aggregate hashrate in hashes per second.
     pub hashrate: u64,
     pub shares_submitted: u64,
+    pub paused: bool,
     pub boards: Vec<BoardState>,
     pub sources: Vec<SourceState>,
 }
