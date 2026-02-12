@@ -115,7 +115,7 @@ impl Daemon {
             let pool_pass = env::var("MUJINA_POOL_PASS").unwrap_or_else(|_| "x".to_string());
 
             let stratum_config = StratumPoolConfig {
-                url: pool_url,
+                url: pool_url.clone(),
                 username: pool_user,
                 password: pool_pass,
                 user_agent: "mujina-miner/0.1.0-alpha".to_string(),
@@ -161,6 +161,7 @@ impl Daemon {
                 source_reg_tx
                     .send(SourceRegistration {
                         name: format!("{} (forced-rate)", stratum_name),
+                        url: Some(pool_url.clone()),
                         event_rx: source_event_rx,
                         command_tx: source_cmd_tx,
                         max_share_rate: None, // Wrapper controls rate
@@ -184,6 +185,7 @@ impl Daemon {
                 source_reg_tx
                     .send(SourceRegistration {
                         name: stratum_source.name(),
+                        url: Some(pool_url),
                         event_rx: source_event_rx,
                         command_tx: source_cmd_tx,
                         max_share_rate: Some(FLOOD_PREVENTION_CAP),
@@ -210,6 +212,7 @@ impl Daemon {
             source_reg_tx
                 .send(SourceRegistration {
                     name: "dummy".into(),
+                    url: None,
                     event_rx: source_event_rx,
                     command_tx: source_cmd_tx,
                     max_share_rate: Some(FLOOD_PREVENTION_CAP),

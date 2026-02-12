@@ -67,7 +67,10 @@ pub struct ThreadState {
 }
 
 /// Job source status.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SourceState {
     pub name: String,
+    /// Connection URL (e.g. "stratum+tcp://pool:3333"), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }

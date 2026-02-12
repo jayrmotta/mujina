@@ -93,6 +93,9 @@ pub struct SourceRegistration {
     /// Source name for logging
     pub name: String,
 
+    /// Connection URL for this source (e.g. "stratum+tcp://pool:3333").
+    pub url: Option<String>,
+
     /// Event receiver for this source (UpdateJob, ReplaceJob, ClearJobs)
     pub event_rx: mpsc::Receiver<SourceEvent>,
 
@@ -108,6 +111,9 @@ pub struct SourceRegistration {
 struct SourceEntry {
     /// Source name for logging
     name: String,
+
+    /// Connection URL for this source.
+    url: Option<String>,
 
     /// Command channel for sending to this source
     command_tx: mpsc::Sender<SourceCommand>,
@@ -213,6 +219,7 @@ impl Scheduler {
                 .values()
                 .map(|s| SourceState {
                     name: s.name.clone(),
+                    url: s.url.clone(),
                 })
                 .collect(),
         }
@@ -279,6 +286,7 @@ impl Scheduler {
     ) {
         let source_id = self.sources.insert(SourceEntry {
             name: registration.name.clone(),
+            url: registration.url,
             command_tx: registration.command_tx,
             last_job: None,
             max_share_rate: registration.max_share_rate,

@@ -171,6 +171,7 @@ mod tests {
             shares_submitted: 5,
             sources: vec![SourceState {
                 name: "pool".into(),
+                url: Some("stratum+tcp://localhost:3333".into()),
             }],
             ..Default::default()
         };
