@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use axum::Router;
+use axum::{Router, response::Redirect, routing};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -118,6 +118,8 @@ pub(crate) fn build_router(
         .split_for_parts();
 
     router
+        .route("/", routing::get(Redirect::permanent("/swagger-ui")))
+        .route("/api", routing::get(Redirect::permanent("/swagger-ui")))
         .merge(SwaggerUi::new("/swagger-ui").url("/api/v0/openapi.json", api))
         .layer(
             TraceLayer::new_for_http()
