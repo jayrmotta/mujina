@@ -245,7 +245,15 @@ impl Daemon {
         self.tracker.spawn({
             let shutdown = self.shutdown.clone();
             async move {
-                let config = ApiConfig::default();
+                // ASCII 'M' (77) + 'U' (85) = 7785
+                const API_PORT: u16 = 7785;
+
+                let bind_addr = match env::var("MUJINA_API_LISTEN") {
+                    Ok(addr) if addr.contains(':') => addr,
+                    Ok(addr) => format!("{addr}:{API_PORT}"),
+                    Err(_) => format!("127.0.0.1:{API_PORT}"),
+                };
+                let config = ApiConfig { bind_addr };
                 if let Err(e) = api::serve(
                     config,
                     shutdown,

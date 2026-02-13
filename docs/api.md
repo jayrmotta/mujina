@@ -1,7 +1,19 @@
 # REST API
 
 Mujina exposes an HTTP API on port 7785 (ASCII "MU") for
-monitoring and control. It binds to localhost by default.
+monitoring and control. It binds to localhost by default. Set
+`MUJINA_API_LISTEN` to override the listen address:
+
+```bash
+MUJINA_API_LISTEN="0.0.0.0" cargo run
+```
+
+The port defaults to 7785 if not specified, or you can
+override it with `MUJINA_API_LISTEN="0.0.0.0:9000"`.
+
+The API currently has no authentication or encryption, so
+binding to a non-localhost address exposes it to the network
+without access control. These will be addressed later.
 
 An OpenAPI spec is served at `/api/v0/openapi.json`. A Swagger
 UI is available at `/swagger-ui` for interactive browsing.

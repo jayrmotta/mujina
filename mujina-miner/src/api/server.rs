@@ -19,17 +19,8 @@ use crate::board::BoardRegistration;
 /// API server configuration.
 #[derive(Debug, Clone)]
 pub struct ApiConfig {
-    /// Address to bind the API server to. Defaults to "127.0.0.1:7785".
-    /// Port 7785 represents ASCII 'M' (77) and 'U' (85).
+    /// Address and port to bind the API server to.
     pub bind_addr: String,
-}
-
-impl Default for ApiConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1:7785".to_string(),
-        }
-    }
 }
 
 /// Shared application state available to all handlers.

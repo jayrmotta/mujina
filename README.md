@@ -127,6 +127,17 @@ Without `MUJINA_POOL_URL`, the miner runs with a dummy job source that
 generates synthetic mining work, which is useful for testing hardware without a
 pool connection.
 
+### API Server
+
+The REST API listens on `127.0.0.1:7785` by default. To listen
+on all interfaces:
+
+```bash
+MUJINA_API_LISTEN="0.0.0.0" cargo run
+```
+
+See [REST API](docs/api.md) for endpoints and details.
+
 ### Running Without Hardware
 
 For development and testing without physical mining hardware, the miner
