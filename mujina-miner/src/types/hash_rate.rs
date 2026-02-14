@@ -1,5 +1,7 @@
 //! Hashrate measurement type.
 
+use std::iter::Sum;
+use std::ops::Add;
 use std::time::Duration;
 
 /// Hashrate measurement.
@@ -79,6 +81,20 @@ impl From<HashRate> for f64 {
     }
 }
 
+impl Add for HashRate {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl Sum for HashRate {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(HashRate(0), |acc, x| acc + x)
+    }
+}
+
 impl std::fmt::Display for HashRate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_human_readable())
@@ -106,5 +122,29 @@ mod tests {
         let rate = HashRate::from_gigahashes(1.5);
         let expected = 1_500_000_000.0;
         assert_eq!(f64::from(rate), expected);
+    }
+
+    #[test]
+    fn add() {
+        let a = HashRate::from_gigahashes(1.0);
+        let b = HashRate::from_gigahashes(2.0);
+        assert_eq!(a + b, HashRate::from_gigahashes(3.0));
+    }
+
+    #[test]
+    fn sum_over_iterator() {
+        let rates = vec![
+            HashRate::from_megahashes(100.0),
+            HashRate::from_megahashes(200.0),
+            HashRate::from_megahashes(300.0),
+        ];
+        let total: HashRate = rates.into_iter().sum();
+        assert_eq!(total, HashRate::from_megahashes(600.0));
+    }
+
+    #[test]
+    fn sum_empty_iterator() {
+        let total: HashRate = std::iter::empty().sum();
+        assert_eq!(total, HashRate::from(0));
     }
 }
