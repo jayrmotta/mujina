@@ -849,9 +849,11 @@ fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_nam
     let time_to_share = expected_time_to_share_from_target(job.share_target, hashrate);
 
     if time_to_share > HIGH_DIFFICULTY_THRESHOLD {
+        let difficulty = Difficulty::from_target(job.share_target);
         warn!(
             source = %source_name,
             job_id = %job.id,
+            difficulty = %difficulty,
             hashrate = %hashrate.to_human_readable(),
             expected_share_interval = %format_duration(time_to_share.as_secs()),
             "Share difficulty too high for hashrate (expected > 5 min between shares)"
