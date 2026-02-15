@@ -54,5 +54,20 @@ pub enum StratumError {
     Timeout,
 }
 
+impl StratumError {
+    /// Whether this error is unrecoverable and should not be retried.
+    ///
+    /// Authorization failures and invalid URLs are fatal---wrong
+    /// credentials and malformed addresses won't fix themselves.
+    /// Everything else (network errors, timeouts, subscription
+    /// failures from overloaded pools) may resolve on retry.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            StratumError::AuthorizationFailed(_) | StratumError::InvalidUrl(_)
+        )
+    }
+}
+
 /// Convenient Result type for Stratum operations.
 pub type StratumResult<T> = Result<T, StratumError>;
