@@ -354,6 +354,10 @@ impl JsonRpcMessage {
     }
 
     /// Create a notification (request without ID).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "will be used as client matures")
+    )]
     pub fn notification(method: impl Into<String>, params: Value) -> Self {
         JsonRpcMessage::Request {
             id: None,
@@ -470,6 +474,19 @@ mod tests {
         let serialized = serde_json::to_string(&msg).unwrap();
         assert!(serialized.contains("mining.subscribe"));
         assert!(serialized.contains("\"id\":1"));
+    }
+
+    #[test]
+    fn test_create_notification() {
+        let msg = JsonRpcMessage::notification("mining.set_difficulty", json!([512]));
+
+        assert!(msg.is_notification());
+        assert_eq!(msg.id(), None);
+        assert_eq!(msg.method(), Some("mining.set_difficulty"));
+
+        let serialized = serde_json::to_string(&msg).unwrap();
+        assert!(serialized.contains("mining.set_difficulty"));
+        assert!(serialized.contains("\"id\":null"));
     }
 
     #[test]

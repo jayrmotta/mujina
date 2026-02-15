@@ -396,9 +396,17 @@ impl StratumV1Client {
 
     /// Suggest a difficulty to the pool.
     ///
-    /// Sends `mining.suggest_difficulty` as a JSON-RPC notification (no id)
-    /// to request work at a specific difficulty. The pool responds with a
-    /// `mining.set_difficulty` notification if it accepts the suggestion.
+    /// Sends `mining.suggest_difficulty` as a JSON-RPC request (with id)
+    /// rather than a notification. Semantically this is a fire-and-forget
+    /// hint---pools that honor it reply indirectly via
+    /// `mining.set_difficulty` notifications, not by responding to the
+    /// request id. We send it as a request anyway because Ocean
+    /// disconnects clients that send it as a notification (id: null)
+    /// but tolerates a request, returning error -3 "Method not found".
+    ///
+    /// The 3-second timeout is expected to expire for most pools. While
+    /// waiting, `send_request`'s internal loop processes any
+    /// `mining.set_difficulty` notifications that arrive in response.
     async fn suggest_difficulty(
         &mut self,
         conn: &mut Connection,
@@ -406,9 +414,29 @@ impl StratumV1Client {
     ) -> StratumResult<()> {
         use serde_json::json;
 
-        // Send as notification (no id, no response expected)
-        let msg = JsonRpcMessage::notification("mining.suggest_difficulty", json!([difficulty]));
-        conn.write_message(&msg).await?;
+        let result = self
+            .send_request(
+                conn,
+                "mining.suggest_difficulty",
+                json!([difficulty]),
+                Duration::from_secs(3),
+            )
+            .await;
+
+        match result {
+            Ok(_) => {
+                debug!(difficulty, "Pool acknowledged suggest_difficulty");
+            }
+            Err(StratumError::Timeout) => {
+                debug!(
+                    difficulty,
+                    "Pool did not respond to suggest_difficulty (timeout)"
+                );
+            }
+            Err(e) => {
+                warn!(difficulty, error = %e, "suggest_difficulty failed");
+            }
+        }
 
         Ok(())
     }
@@ -786,6 +814,11 @@ mod tests {
     /// Integration test: Connect to Ocean and validate protocol.
     ///
     /// Tests against mine.ocean.xyz to validate protocol compatibility.
+    /// Sends `suggest_difficulty` to exercise Ocean's handling: Ocean
+    /// doesn't support the method and returns error -3 "Method not
+    /// found", but stays connected. This only works because we send
+    /// it as a request (with id). Ocean disconnects clients that send
+    /// `mining.suggest_difficulty` as a notification (id: null).
     ///
     /// See [`test_integration_public_pool`] for running instructions.
     #[tokio::test]
@@ -853,11 +886,10 @@ mod tests {
     /// 2. **Collect events**: Wait for subscription, job, and difficulty events
     /// 3. **Stability check**: Wait 5 seconds to ensure pool doesn't disconnect
     ///
-    /// The stability check (phase 3) was added after discovering that Ocean pool
-    /// silently disconnects clients that suggest a difficulty lower than their
-    /// minimum. We now avoid suggesting difficulty altogether, but the stability
-    /// check remains valuable for catching delayed disconnects from pools that
-    /// reject our configuration after the initial handshake.
+    /// The stability check (phase 3) catches delayed disconnects from pools
+    /// that reject our configuration after the initial handshake. For example,
+    /// Ocean disconnects clients that send `mining.suggest_difficulty` as a
+    /// notification but tolerates it as a request (see the Ocean test).
     async fn test_pool_integration(pool_url: &str, username: &str) {
         use tracing_subscriber::{EnvFilter, fmt};
 
