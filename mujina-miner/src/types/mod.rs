@@ -5,6 +5,7 @@
 //! mining-specific types.
 
 mod bitcoin_impls;
+mod debounced_alarm;
 mod difficulty;
 mod hash_rate;
 mod hashrate_estimator;
@@ -17,6 +18,7 @@ use crate::u256::U256;
 // Re-export frequently used bitcoin types for convenience
 pub use bitcoin::block::Header as BlockHeader;
 pub use bitcoin::{Amount, BlockHash, Network, Target, Transaction, TxOut, Work};
+pub use debounced_alarm::{AlarmStatus, DebouncedAlarm};
 pub use difficulty::Difficulty;
 pub use hash_rate::HashRate;
 pub use hashrate_estimator::HashrateEstimator;
