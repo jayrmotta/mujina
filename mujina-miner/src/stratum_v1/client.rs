@@ -831,6 +831,20 @@ mod tests {
         .await;
     }
 
+    /// Integration test: Connect to 256 Foundation pool and validate protocol.
+    ///
+    /// See [`test_integration_public_pool`] for running instructions.
+    #[tokio::test]
+    #[ignore]
+    async fn test_integration_256foundation() {
+        test_pool_integration(
+            "pool.256foundation.org:3333",
+            "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test",
+            None,
+        )
+        .await;
+    }
+
     /// Integration test: Connect using environment variables.
     ///
     /// Tests against a pool specified by environment variables. Uses the same
