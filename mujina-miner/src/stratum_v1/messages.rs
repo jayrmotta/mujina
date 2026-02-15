@@ -73,6 +73,9 @@ pub enum ClientEvent {
 pub enum ClientCommand {
     /// Submit a share to the pool
     SubmitShare(SubmitParams),
+
+    /// Suggest a new difficulty to the pool
+    SuggestDifficulty(u64),
 }
 
 /// Mining job notification from pool (mining.notify).

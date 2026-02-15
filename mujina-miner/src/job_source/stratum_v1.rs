@@ -4,18 +4,26 @@
 //! abstraction. It handles the conversion between Stratum protocol messages and
 //! the internal JobTemplate/Share types used by the scheduler.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
 
-use crate::stratum_v1::{ClientEvent, JobNotification, PoolConfig};
-use crate::types::{Difficulty, HashRate};
+use crate::stratum_v1::{ClientCommand, ClientEvent, JobNotification, PoolConfig};
+use crate::tracing::prelude::*;
+use crate::types::{Difficulty, HashRate, ShareRate, target_for_share_rate};
 
 use super::{
     Extranonce2Range, GeneralPurposeBits, JobTemplate, MerkleRootKind, MerkleRootTemplate, Share,
     SourceCommand, SourceEvent, VersionTemplate,
 };
+
+/// Target share rate for suggest_difficulty: 20 shares/min (one every 3 sec).
+const SUGGESTED_SHARE_RATE: ShareRate = ShareRate::from_interval(Duration::from_secs(3));
+
+/// Re-suggest when new difficulty is >2x or <0.5x the last-suggested value.
+const MATERIAL_CHANGE_FACTOR: f64 = 2.0;
 
 /// Stratum v1 job source.
 ///
@@ -43,6 +51,9 @@ pub struct StratumV1Source {
 
     /// Expected hashrate (an estimate, not a measurement)
     expected_hashrate: HashRate,
+
+    /// Last difficulty we suggested to the pool (for material-change detection)
+    last_suggested_difficulty: Option<u64>,
 }
 
 /// Protocol state after successful subscription.
@@ -77,6 +88,7 @@ impl StratumV1Source {
             state: None,
             first_share_logged: false,
             expected_hashrate: HashRate::default(),
+            last_suggested_difficulty: None,
         }
     }
 
@@ -187,10 +199,9 @@ impl StratumV1Source {
             ClientEvent::NewJob(job) => {
                 debug!(job_id = %job.job_id, clean_jobs = job.clean_jobs, "Received job from pool");
 
-                let template = self.job_to_template(job.clone())?;
-
-                // Clean jobs means previous work is invalid
-                let event = if job.clean_jobs {
+                let clean_jobs = job.clean_jobs;
+                let template = self.job_to_template(job)?;
+                let event = if clean_jobs {
                     SourceEvent::ReplaceJob(template)
                 } else {
                     SourceEvent::UpdateJob(template)
@@ -283,16 +294,99 @@ impl StratumV1Source {
         })
     }
 
+    /// Compute the suggested difficulty for the given hashrate.
+    ///
+    /// Returns `None` for zero hashrate (nothing to suggest yet).
+    fn compute_suggested_difficulty(hashrate: HashRate) -> Option<u64> {
+        if hashrate.is_zero() {
+            return None;
+        }
+        let target = target_for_share_rate(SUGGESTED_SHARE_RATE, hashrate);
+        let diff = Difficulty::from_target(target).as_u64().max(1);
+        Some(diff)
+    }
+
+    /// Send `SuggestDifficulty` if the computed value changed materially
+    /// (factor of 2) from the last suggestion.
+    async fn maybe_suggest_difficulty(&mut self, client_command_tx: &mpsc::Sender<ClientCommand>) {
+        let Some(new_diff) = Self::compute_suggested_difficulty(self.expected_hashrate) else {
+            return;
+        };
+
+        let dominated = match self.last_suggested_difficulty {
+            Some(prev) => {
+                let ratio = new_diff as f64 / prev as f64;
+                ratio >= MATERIAL_CHANGE_FACTOR || ratio <= 1.0 / MATERIAL_CHANGE_FACTOR
+            }
+            None => true,
+        };
+
+        if !dominated {
+            return;
+        }
+
+        debug!(
+            difficulty = new_diff,
+            hashrate = %self.expected_hashrate,
+            "Suggesting difficulty to pool"
+        );
+        self.last_suggested_difficulty = Some(new_diff);
+
+        if let Err(e) = client_command_tx
+            .send(ClientCommand::SuggestDifficulty(new_diff))
+            .await
+        {
+            warn!(error = %e, "Failed to send suggest_difficulty to client");
+        }
+    }
+
     /// Run the source (main event loop).
     ///
-    /// Spawns the Stratum client and bridges events between the client and
-    /// the job source interface.
+    /// Defers pool connection until the scheduler provides a positive
+    /// hashrate via `UpdateHashRate`, so `suggest_difficulty` always has a
+    /// meaningful value at connect time. Once connected, re-suggests when
+    /// hashrate changes materially (factor of 2).
     pub async fn run(mut self) -> Result<()> {
-        debug!(pool = %self.config.url, "Connecting to pool");
+        info!(pool = %self.config.url, "Waiting for hashrate before connecting");
+
+        // Phase 1: wait for a positive hashrate before connecting.
+        // Drain commands; only UpdateHashRate matters here.
+        loop {
+            tokio::select! {
+                Some(cmd) = self.command_rx.recv() => {
+                    match cmd {
+                        SourceCommand::UpdateHashRate(rate) => {
+                            self.expected_hashrate = rate;
+                            if !rate.is_zero() {
+                                break;
+                            }
+                        }
+                        SourceCommand::SubmitShare(_) => {
+                            // No connection yet, drop silently.
+                        }
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Phase 2: connect and run.
+        debug!(
+            pool = %self.config.url,
+            hashrate = %self.expected_hashrate,
+            "Hashrate available, connecting to pool"
+        );
 
         // Create channels for client communication
         let (client_event_tx, mut client_event_rx) = mpsc::channel(100);
         let (client_command_tx, client_command_rx) = mpsc::channel(100);
+
+        // Compute initial difficulty so the client can send it inline
+        // during the handshake, before the first job arrives.
+        let initial_difficulty = Self::compute_suggested_difficulty(self.expected_hashrate);
+        self.last_suggested_difficulty = initial_difficulty;
 
         // Create the Stratum client with command channel
         let client = crate::stratum_v1::StratumV1Client::with_commands(
@@ -300,6 +394,7 @@ impl StratumV1Source {
             client_event_tx,
             client_command_rx,
             self.shutdown.clone(),
+            initial_difficulty,
         );
 
         // Spawn client task
@@ -338,7 +433,7 @@ impl StratumV1Source {
                             match self.share_to_submit_params(share) {
                                 Ok(submit_params) => {
                                     if let Err(e) = client_command_tx.send(
-                                        crate::stratum_v1::ClientCommand::SubmitShare(submit_params)
+                                        ClientCommand::SubmitShare(submit_params)
                                     ).await {
                                         warn!(error = %e, "Failed to send share to client");
                                     }
@@ -351,6 +446,7 @@ impl StratumV1Source {
 
                         SourceCommand::UpdateHashRate(rate) => {
                             self.expected_hashrate = rate;
+                            self.maybe_suggest_difficulty(&client_command_tx).await;
                         }
                     }
                 }
@@ -412,7 +508,7 @@ mod tests {
             username: "testworker".to_string(),
             password: "x".to_string(),
             user_agent: "test".to_string(),
-            suggested_difficulty: Some(1024),
+            ..Default::default()
         };
 
         let mut source = StratumV1Source::new(config, command_rx, event_tx, shutdown);
@@ -790,6 +886,135 @@ mod tests {
             merkle_root,
             *notify::MERKLE_ROOT,
             "Computed merkle root doesn't match capture"
+        );
+    }
+
+    #[test]
+    fn test_compute_suggested_difficulty_zero_hashrate() {
+        assert_eq!(
+            StratumV1Source::compute_suggested_difficulty(HashRate::default()),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_compute_suggested_difficulty_bitaxe_gamma() {
+        // ~500 GH/s at 20 shares/min (3-sec interval) should yield ~349
+        let diff = StratumV1Source::compute_suggested_difficulty(HashRate::from_gigahashes(500.0))
+            .unwrap();
+        assert!(
+            (300..400).contains(&diff),
+            "Bitaxe Gamma difficulty {diff} not in expected range 300..400"
+        );
+    }
+
+    #[test]
+    fn test_compute_suggested_difficulty_always_at_least_one() {
+        // Even at very low hashrate, difficulty should be at least 1
+        let diff =
+            StratumV1Source::compute_suggested_difficulty(HashRate::from_megahashes(1.0)).unwrap();
+        assert!(diff >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_suggest_difficulty_first_call_always_sends() {
+        let (event_tx, _event_rx) = mpsc::channel(10);
+        let (_command_tx, command_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+        let config = PoolConfig {
+            url: "stratum+tcp://test:3333".to_string(),
+            ..Default::default()
+        };
+
+        let mut source = StratumV1Source::new(config, command_rx, event_tx, shutdown);
+        source.expected_hashrate = HashRate::from_terahashes(1.0);
+
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        source.maybe_suggest_difficulty(&client_tx).await;
+
+        let cmd = client_rx.try_recv().expect("should have sent command");
+        match cmd {
+            ClientCommand::SuggestDifficulty(d) => {
+                assert!(d > 0, "difficulty should be positive");
+            }
+            other => panic!("expected SuggestDifficulty, got {other:?}"),
+        }
+        assert!(source.last_suggested_difficulty.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_maybe_suggest_difficulty_suppresses_small_changes() {
+        let (event_tx, _event_rx) = mpsc::channel(10);
+        let (_command_tx, command_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+        let config = PoolConfig {
+            url: "stratum+tcp://test:3333".to_string(),
+            ..Default::default()
+        };
+
+        let mut source = StratumV1Source::new(config, command_rx, event_tx, shutdown);
+        source.expected_hashrate = HashRate::from_terahashes(1.0);
+
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+
+        // First call sends
+        source.maybe_suggest_difficulty(&client_tx).await;
+        let _ = client_rx.try_recv().unwrap();
+
+        // Same hashrate again -- no material change, should not send
+        source.maybe_suggest_difficulty(&client_tx).await;
+        assert!(
+            client_rx.try_recv().is_err(),
+            "should not re-suggest for same hashrate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_suggest_difficulty_sends_on_material_change() {
+        let (event_tx, _event_rx) = mpsc::channel(10);
+        let (_command_tx, command_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+        let config = PoolConfig {
+            url: "stratum+tcp://test:3333".to_string(),
+            ..Default::default()
+        };
+
+        let mut source = StratumV1Source::new(config, command_rx, event_tx, shutdown);
+        source.expected_hashrate = HashRate::from_terahashes(1.0);
+
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+
+        // First call
+        source.maybe_suggest_difficulty(&client_tx).await;
+        let _ = client_rx.try_recv().unwrap();
+
+        // Double hashrate -- 2x change, should re-suggest
+        source.expected_hashrate = HashRate::from_terahashes(2.5);
+        source.maybe_suggest_difficulty(&client_tx).await;
+        assert!(
+            client_rx.try_recv().is_ok(),
+            "should re-suggest after 2x hashrate change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_suggest_difficulty_skips_zero_hashrate() {
+        let (event_tx, _event_rx) = mpsc::channel(10);
+        let (_command_tx, command_rx) = mpsc::channel(10);
+        let shutdown = CancellationToken::new();
+        let config = PoolConfig {
+            url: "stratum+tcp://test:3333".to_string(),
+            ..Default::default()
+        };
+
+        let mut source = StratumV1Source::new(config, command_rx, event_tx, shutdown);
+        // hashrate is zero by default
+
+        let (client_tx, mut client_rx) = mpsc::channel(10);
+        source.maybe_suggest_difficulty(&client_tx).await;
+        assert!(
+            client_rx.try_recv().is_err(),
+            "should not suggest with zero hashrate"
         );
     }
 }

@@ -119,7 +119,6 @@ impl Daemon {
                 username: pool_user,
                 password: pool_pass,
                 user_agent: "mujina-miner/0.1.0-alpha".to_string(),
-                suggested_difficulty: None,
             };
 
             // Optionally wrap with ForcedRateSource for testing

@@ -26,13 +26,6 @@ pub struct PoolConfig {
 
     /// User agent string
     pub user_agent: String,
-
-    /// Suggested starting difficulty
-    ///
-    /// If Some, sent via mining.suggest_difficulty after authorization to
-    /// request work at an appropriate difficulty for the miner's hashrate.
-    /// If None, the pool chooses difficulty.
-    pub suggested_difficulty: Option<u64>,
 }
 
 impl Default for PoolConfig {
@@ -42,7 +35,6 @@ impl Default for PoolConfig {
             username: String::new(),
             password: String::new(),
             user_agent: "mujina-miner/0.1.0-alpha".to_string(),
-            suggested_difficulty: None,
         }
     }
 }
@@ -73,6 +65,10 @@ pub struct StratumV1Client {
 
     /// Protocol state (filled after subscription)
     state: Option<ProtocolState>,
+
+    /// Initial difficulty to suggest during the handshake (before the main
+    /// event loop). Subsequent re-suggestions arrive via `ClientCommand`.
+    initial_suggest_difficulty: Option<u64>,
 }
 
 /// Protocol state after successful subscription.
@@ -105,6 +101,7 @@ impl StratumV1Client {
             shutdown,
             next_id: 1,
             state: None,
+            initial_suggest_difficulty: None,
         }
     }
 
@@ -114,6 +111,7 @@ impl StratumV1Client {
         event_tx: mpsc::Sender<ClientEvent>,
         command_rx: mpsc::Receiver<ClientCommand>,
         shutdown: CancellationToken,
+        initial_suggest_difficulty: Option<u64>,
     ) -> Self {
         Self {
             config,
@@ -122,6 +120,7 @@ impl StratumV1Client {
             shutdown,
             next_id: 1,
             state: None,
+            initial_suggest_difficulty,
         }
     }
 
@@ -676,9 +675,11 @@ impl StratumV1Client {
         self.authorize(&mut conn).await?;
         debug!("Authorized");
 
-        // Suggest difficulty if configured
-        if let Some(difficulty) = self.config.suggested_difficulty {
-            trace!(difficulty, "Suggesting difficulty to pool");
+        // Suggest difficulty after authorize. The source drops jobs
+        // until the pool responds with a matching set_difficulty, so
+        // the scheduler never sees the pool's default difficulty.
+        if let Some(difficulty) = self.initial_suggest_difficulty {
+            trace!(difficulty, "Suggesting initial difficulty to pool");
             if let Err(e) = self.suggest_difficulty(&mut conn, difficulty).await {
                 warn!(error = %e, "Failed to suggest difficulty (non-fatal)");
             }
@@ -748,6 +749,12 @@ impl StratumV1Client {
                             }
                             // Acceptance/rejection emitted via ShareAccepted/ShareRejected events
                         }
+                        ClientCommand::SuggestDifficulty(difficulty) => {
+                            trace!(difficulty, "Re-suggesting difficulty to pool");
+                            if let Err(e) = self.suggest_difficulty(&mut conn, difficulty).await {
+                                warn!(error = %e, "Failed to suggest difficulty (non-fatal)");
+                            }
+                        }
                     }
                 }
 
@@ -814,11 +821,6 @@ mod tests {
     /// Integration test: Connect to Ocean and validate protocol.
     ///
     /// Tests against mine.ocean.xyz to validate protocol compatibility.
-    /// Sends `suggest_difficulty` to exercise Ocean's handling: Ocean
-    /// doesn't support the method and returns error -3 "Method not
-    /// found", but stays connected. This only works because we send
-    /// it as a request (with id). Ocean disconnects clients that send
-    /// `mining.suggest_difficulty` as a notification (id: null).
     ///
     /// See [`test_integration_public_pool`] for running instructions.
     #[tokio::test]
@@ -840,7 +842,6 @@ mod tests {
         test_pool_integration(
             "pool.256foundation.org:3333",
             "bc1qce93hy5rhg02s6aeu7mfdvxg76x66pqqtrvzs3.mujina-integration-test",
-            None,
         )
         .await;
     }
@@ -922,7 +923,6 @@ mod tests {
             username: username.to_string(),
             password: "x".to_string(),
             user_agent: "mujina-miner/0.1.0-test".to_string(),
-            suggested_difficulty: None,
         };
 
         println!("\n=== Connecting to {} ===", pool_url);
@@ -1085,7 +1085,6 @@ mod tests {
             username: "test".to_string(),
             password: "x".to_string(),
             user_agent: "test".to_string(),
-            suggested_difficulty: Some(1024),
         };
 
         let client = StratumV1Client::new(config, event_tx, shutdown);
