@@ -4,6 +4,8 @@
 //! abstraction. It handles the conversion between Stratum protocol messages and
 //! the internal JobTemplate/Share types used by the scheduler.
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,6 +26,58 @@ const SUGGESTED_SHARE_RATE: ShareRate = ShareRate::from_interval(Duration::from_
 
 /// Re-suggest when new difficulty is >2x or <0.5x the last-suggested value.
 const MATERIAL_CHANGE_FACTOR: f64 = 2.0;
+
+/// Exponential backoff for reconnection timing.
+///
+/// Starts at `initial` and doubles after each call to `next_delay()`,
+/// capping at `max`. Each returned delay is jittered to [0.5, 1.0) of
+/// the nominal value to avoid thundering-herd reconnections.
+struct ExponentialBackoff {
+    current: Duration,
+    initial: Duration,
+    max: Duration,
+    // Per-process jitter seed. RandomState is seeded from OS randomness
+    // at construction, so different processes produce different jitter
+    // even when reconnecting at the same wall-clock instant. This is
+    // the same approach tokio uses internally for jittered timeouts.
+    jitter_state: RandomState,
+    jitter_step: u64,
+}
+
+#[expect(dead_code, reason = "used by reconnection loop in next commit")]
+impl ExponentialBackoff {
+    fn new(initial: Duration, max: Duration) -> Self {
+        Self {
+            current: initial,
+            initial,
+            max,
+            jitter_state: RandomState::new(),
+            jitter_step: 0,
+        }
+    }
+
+    /// Return the next backoff delay (with jitter) and advance the state.
+    ///
+    /// The nominal delay (1s, 2s, 4s, ...) is scaled by a jitter factor
+    /// in [0.5, 1.0] to spread out reconnection attempts across miners.
+    fn next_delay(&mut self) -> Duration {
+        let nominal = self.current;
+        self.current = (self.current * 2).min(self.max);
+
+        let mut hasher = self.jitter_state.build_hasher();
+        hasher.write_u64(self.jitter_step);
+        self.jitter_step = self.jitter_step.wrapping_add(1);
+        let hash = hasher.finish();
+        let jitter = 0.5 + (hash as f64 / u64::MAX as f64) * 0.5;
+
+        nominal.mul_f64(jitter)
+    }
+
+    /// Reset backoff to the initial delay.
+    fn reset(&mut self) {
+        self.current = self.initial;
+    }
+}
 
 /// Stratum v1 job source.
 ///
@@ -1016,5 +1070,57 @@ mod tests {
             client_rx.try_recv().is_err(),
             "should not suggest with zero hashrate"
         );
+    }
+
+    #[test]
+    fn backoff_doubles_each_step() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
+
+        let d1 = backoff.next_delay();
+        let d2 = backoff.next_delay();
+        let d3 = backoff.next_delay();
+
+        // Nominal sequence is 1s, 2s, 4s. With jitter in [0.5, 1.0],
+        // each delay is at least half the nominal value.
+        assert!(d1 >= Duration::from_millis(500), "d1={d1:?}");
+        assert!(d1 < Duration::from_secs(1), "d1={d1:?}");
+
+        assert!(d2 >= Duration::from_secs(1), "d2={d2:?}");
+        assert!(d2 < Duration::from_secs(2), "d2={d2:?}");
+
+        assert!(d3 >= Duration::from_secs(2), "d3={d3:?}");
+        assert!(d3 < Duration::from_secs(4), "d3={d3:?}");
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(32), Duration::from_secs(60));
+
+        let _d1 = backoff.next_delay(); // consumes 32s nominal
+        let d2 = backoff.next_delay(); // nominal capped at 60s
+
+        assert!(d2 >= Duration::from_secs(30), "d2={d2:?}");
+        assert!(d2 < Duration::from_secs(60), "d2={d2:?}");
+
+        // Further calls stay at max
+        let d3 = backoff.next_delay();
+        assert!(d3 >= Duration::from_secs(30), "d3={d3:?}");
+        assert!(d3 < Duration::from_secs(60), "d3={d3:?}");
+    }
+
+    #[test]
+    fn backoff_reset_restores_initial() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
+
+        // Advance past initial
+        let _ = backoff.next_delay();
+        let _ = backoff.next_delay();
+        let _ = backoff.next_delay();
+
+        backoff.reset();
+
+        let d = backoff.next_delay();
+        assert!(d >= Duration::from_millis(500), "d={d:?}");
+        assert!(d < Duration::from_secs(1), "d={d:?}");
     }
 }
