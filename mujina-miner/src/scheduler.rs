@@ -49,8 +49,8 @@ use crate::job_source::{
 };
 use crate::tracing::prelude::*;
 use crate::types::{
-    Difficulty, HashRate, HashrateEstimator, ShareRate, Target, expected_time_to_share_from_target,
-    target_for_share_rate,
+    AlarmStatus, DebouncedAlarm, Difficulty, HashRate, HashrateEstimator, ShareRate, Target,
+    expected_time_to_share_from_target, target_for_share_rate,
 };
 
 /// Unique identifier for a job source, assigned by the scheduler.
@@ -142,6 +142,9 @@ struct SourceEntry {
 
     /// Last job received from this source (for assigning to newly-arriving threads)
     last_job: Option<Arc<JobTemplate>>,
+
+    /// Debounced alarm for high-difficulty warnings.
+    difficulty_alarm: DebouncedAlarm,
 }
 
 /// Whether to update alongside existing work or replace it.
@@ -177,9 +180,6 @@ struct Scheduler {
     /// Mining statistics
     stats: MiningStats,
 
-    /// Track sources warned about high difficulty (reset on hashrate change)
-    difficulty_warned_sources: HashSet<SourceId>,
-
     /// Track thread count for disconnect detection
     last_thread_count: usize,
 
@@ -194,7 +194,6 @@ impl Scheduler {
             threads: SlotMap::new(),
             tasks: SlotMap::new(),
             stats: MiningStats::default(),
-            difficulty_warned_sources: HashSet::new(),
             last_thread_count: 0,
             paused: false,
         }
@@ -315,6 +314,7 @@ impl Scheduler {
             url: registration.url,
             command_tx: registration.command_tx,
             last_job: None,
+            difficulty_alarm: DebouncedAlarm::new(HIGH_DIFFICULTY_DEBOUNCE),
         });
         source_events.insert(source_id, ReceiverStream::new(registration.event_rx));
         debug!(source_id = ?source_id, name = %registration.name, "Source registered");
@@ -352,8 +352,13 @@ impl Scheduler {
 
         let template = Arc::new(job_template);
 
-        // Cache job for newly-arriving threads
+        // Reset debounce when difficulty changes so the alarm doesn't
+        // fire during the transient after a pool adjustment.
         if let Some(source) = self.sources.get_mut(source_id) {
+            let prev_target = source.last_job.as_ref().map(|j| j.share_target);
+            if prev_target != Some(template.share_target) {
+                source.difficulty_alarm.reset();
+            }
             source.last_job = Some(template.clone());
         }
 
@@ -363,11 +368,32 @@ impl Scheduler {
             return;
         }
 
-        // Check if difficulty is reasonable for our hashrate (once per source)
-        if !self.difficulty_warned_sources.contains(&source_id) {
-            let hashrate = self.operational_hashrate();
-            if warn_if_difficulty_too_high(&template, hashrate, &source_name) {
-                self.difficulty_warned_sources.insert(source_id);
+        // Debounced difficulty warning
+        let hashrate = self.operational_hashrate();
+        if let Some(source) = self.sources.get_mut(source_id) {
+            let too_high = is_difficulty_too_high(&template, hashrate);
+            match source.difficulty_alarm.check(too_high) {
+                AlarmStatus::Triggered => {
+                    let difficulty = Difficulty::from_target(template.share_target);
+                    warn!(
+                        source = %source_name,
+                        job_id = %template.id,
+                        difficulty = %difficulty,
+                        hashrate = %hashrate.to_human_readable(),
+                        expected_share_interval =
+                            %format_duration(expected_time_to_share_from_target(
+                                template.share_target, hashrate).as_secs()),
+                        "Share difficulty too high for hashrate \
+                         (expected > 5 min between shares)"
+                    );
+                }
+                AlarmStatus::Resolved => {
+                    info!(
+                        source = %source_name,
+                        "Share difficulty now acceptable for hashrate"
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -562,8 +588,10 @@ impl Scheduler {
         let senders = self.hashrate_senders();
         broadcast_hashrate(senders, hashrate).await;
 
-        // Reset difficulty warnings since hashrate changed
-        self.difficulty_warned_sources.clear();
+        // Reset difficulty alarm since hashrate changed
+        for source in self.sources.values_mut() {
+            source.difficulty_alarm.reset();
+        }
 
         self.last_thread_count = thread_events.len();
 
@@ -662,8 +690,10 @@ impl Scheduler {
         let senders = self.hashrate_senders();
         broadcast_hashrate(senders, hashrate).await;
 
-        // Reset difficulty warnings since hashrate changed
-        self.difficulty_warned_sources.clear();
+        // Reset difficulty alarm since hashrate changed
+        for source in self.sources.values_mut() {
+            source.difficulty_alarm.reset();
+        }
     }
 
     /// Handle an API command, sending the result back on the reply channel.
@@ -841,31 +871,21 @@ async fn broadcast_hashrate(senders: Vec<mpsc::Sender<SourceCommand>>, hashrate:
 /// pool difficulty may be misconfigured for this hashrate.
 const HIGH_DIFFICULTY_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
-/// Warn if job difficulty is unreasonably high for our hashrate.
+/// How long difficulty must remain too high before warning.
 ///
-/// Returns `true` if warning was triggered, so caller can track and avoid
-/// repeated warnings.
-fn warn_if_difficulty_too_high(job: &JobTemplate, hashrate: HashRate, source_name: &str) -> bool {
+/// Absorbs transients like pool connections starting with a default
+/// difficulty before `suggest_difficulty` takes effect, and brief
+/// hashrate changes from board hotplug.
+const HIGH_DIFFICULTY_DEBOUNCE: Duration = Duration::from_secs(30);
+
+/// Check whether job difficulty is unreasonably high for our hashrate.
+fn is_difficulty_too_high(job: &JobTemplate, hashrate: HashRate) -> bool {
     if hashrate.is_zero() {
-        return false; // Can't calculate without hashrate
+        return false;
     }
 
     let time_to_share = expected_time_to_share_from_target(job.share_target, hashrate);
-
-    if time_to_share > HIGH_DIFFICULTY_THRESHOLD {
-        let difficulty = Difficulty::from_target(job.share_target);
-        warn!(
-            source = %source_name,
-            job_id = %job.id,
-            difficulty = %difficulty,
-            hashrate = %hashrate.to_human_readable(),
-            expected_share_interval = %format_duration(time_to_share.as_secs()),
-            "Share difficulty too high for hashrate (expected > 5 min between shares)"
-        );
-        true
-    } else {
-        false
-    }
+    time_to_share > HIGH_DIFFICULTY_THRESHOLD
 }
 
 /// Run the scheduler task, receiving hash threads and job sources.
