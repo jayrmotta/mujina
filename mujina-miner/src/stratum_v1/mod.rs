@@ -48,8 +48,8 @@ mod error;
 mod messages;
 
 pub use client::{PoolConfig, StratumV1Client};
-pub use connection::Transport;
+pub use connection::{Connector, TcpConnector, Transport};
 #[cfg(test)]
-pub(crate) use connection::{MockTransport, MockTransportHandle};
+pub(crate) use connection::{MockConnector, MockTransport, MockTransportHandle};
 pub use error::{StratumError, StratumResult};
 pub use messages::{ClientCommand, ClientEvent, JobNotification, SubmitParams};

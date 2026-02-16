@@ -127,6 +127,51 @@ impl Transport for Connection {
     }
 }
 
+/// Forwarding impl so `Box<dyn Transport>` satisfies `impl Transport`.
+///
+/// `async_trait` doesn't auto-derive this, so spell it out. This lets
+/// `Connector::connect()` return `Box<dyn Transport>` and callers can
+/// pass it straight into `run_with_transport()`.
+#[async_trait]
+impl Transport for Box<dyn Transport> {
+    async fn read_message(&mut self) -> StratumResult<Option<JsonRpcMessage>> {
+        (**self).read_message().await
+    }
+
+    async fn write_message(&mut self, msg: &JsonRpcMessage) -> StratumResult<()> {
+        (**self).write_message(msg).await
+    }
+}
+
+/// Factory for creating transport connections.
+///
+/// Production code uses [`TcpConnector`] (TCP via [`Connection::connect`]);
+/// tests use [`MockConnector`] to inject channel-backed transports.
+#[async_trait]
+pub trait Connector: Send {
+    /// Create a new transport connection.
+    async fn connect(&mut self) -> StratumResult<Box<dyn Transport>>;
+}
+
+/// Connects to a Stratum pool over TCP.
+pub struct TcpConnector {
+    url: String,
+}
+
+impl TcpConnector {
+    pub fn new(url: String) -> Self {
+        Self { url }
+    }
+}
+
+#[async_trait]
+impl Connector for TcpConnector {
+    async fn connect(&mut self) -> StratumResult<Box<dyn Transport>> {
+        let conn = Connection::connect(&self.url).await?;
+        Ok(Box::new(conn))
+    }
+}
+
 /// Channel-based transport for deterministic testing.
 ///
 /// Backed by tokio mpsc channels rather than TCP, so it works with
@@ -195,6 +240,35 @@ impl MockTransportHandle {
     /// Receive a message the client wrote.
     pub async fn recv(&mut self) -> JsonRpcMessage {
         self.rx.recv().await.expect("transport dropped")
+    }
+}
+
+/// Connector that pulls pre-built transports from a channel.
+///
+/// Each call to `connect()` receives the next `MockTransport` from the
+/// channel, letting tests supply exactly the transports they need.
+#[cfg(test)]
+pub(crate) struct MockConnector {
+    rx: tokio::sync::mpsc::Receiver<MockTransport>,
+}
+
+#[cfg(test)]
+impl MockConnector {
+    pub fn new(rx: tokio::sync::mpsc::Receiver<MockTransport>) -> Self {
+        Self { rx }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl Connector for MockConnector {
+    async fn connect(&mut self) -> StratumResult<Box<dyn Transport>> {
+        match self.rx.recv().await {
+            Some(transport) => Ok(Box::new(transport)),
+            None => Err(StratumError::ConnectionFailed(
+                "no more mock transports".into(),
+            )),
+        }
     }
 }
 

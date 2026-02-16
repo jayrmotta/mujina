@@ -23,7 +23,7 @@ use crate::{
         stratum_v1::StratumV1Source,
     },
     scheduler::{self, SourceRegistration},
-    stratum_v1::PoolConfig as StratumPoolConfig,
+    stratum_v1::{PoolConfig as StratumPoolConfig, TcpConnector},
     transport::{CpuDeviceInfo, TransportEvent, UsbTransport, cpu as cpu_transport},
 };
 
@@ -137,6 +137,7 @@ impl Daemon {
                     inner_cmd_rx,
                     inner_event_tx,
                     self.shutdown.clone(),
+                    Box::new(TcpConnector::new(pool_url.clone())),
                 );
                 let stratum_name = stratum_source.name();
 
@@ -178,6 +179,7 @@ impl Daemon {
                     source_cmd_rx,
                     source_event_tx,
                     self.shutdown.clone(),
+                    Box::new(TcpConnector::new(pool_url.clone())),
                 );
 
                 source_reg_tx

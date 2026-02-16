@@ -12,7 +12,9 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::stratum_v1::{ClientCommand, ClientEvent, JobNotification, PoolConfig};
+use crate::stratum_v1::{
+    ClientCommand, ClientEvent, Connector, JobNotification, PoolConfig, StratumV1Client,
+};
 use crate::tracing::prelude::*;
 use crate::types::{Difficulty, HashRate, ShareRate, target_for_share_rate};
 
@@ -27,10 +29,18 @@ const SUGGESTED_SHARE_RATE: ShareRate = ShareRate::from_interval(Duration::from_
 /// Re-suggest when new difficulty is >2x or <0.5x the last-suggested value.
 const MATERIAL_CHANGE_FACTOR: f64 = 2.0;
 
+/// Minimum connection duration before backoff resets on disconnect.
+///
+/// If a connection was alive for at least this long, the next reconnect
+/// starts at the initial backoff (1 s). Shorter connections leave the
+/// backoff untouched, preventing tight reconnection loops against a
+/// flapping pool that accepts and immediately drops.
+const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(60);
+
 /// Exponential backoff for reconnection timing.
 ///
 /// Starts at `initial` and doubles after each call to `next_delay()`,
-/// capping at `max`. Each returned delay is jittered to [0.5, 1.0) of
+/// capping at `max`. Each returned delay is jittered to [0.5, 1.0] of
 /// the nominal value to avoid thundering-herd reconnections.
 struct ExponentialBackoff {
     current: Duration,
@@ -44,7 +54,6 @@ struct ExponentialBackoff {
     jitter_step: u64,
 }
 
-#[expect(dead_code, reason = "used by reconnection loop in next commit")]
 impl ExponentialBackoff {
     fn new(initial: Duration, max: Duration) -> Self {
         Self {
@@ -79,6 +88,16 @@ impl ExponentialBackoff {
     }
 }
 
+/// Outcome of a single connection attempt.
+enum ConnectOutcome {
+    /// Graceful shutdown requested.
+    Shutdown,
+    /// Connection lost; retry after backoff.
+    Disconnected,
+    /// Unrecoverable error (e.g. auth failure); stop retrying.
+    Fatal(anyhow::Error),
+}
+
 /// Stratum v1 job source.
 ///
 /// Wraps a StratumV1Client and bridges between the Stratum protocol and
@@ -108,6 +127,9 @@ pub struct StratumV1Source {
 
     /// Last difficulty we suggested to the pool (for material-change detection)
     last_suggested_difficulty: Option<u64>,
+
+    /// Factory for creating transport connections.
+    connector: Box<dyn Connector>,
 }
 
 /// Protocol state after successful subscription.
@@ -133,6 +155,7 @@ impl StratumV1Source {
         command_rx: mpsc::Receiver<SourceCommand>,
         event_tx: mpsc::Sender<SourceEvent>,
         shutdown: CancellationToken,
+        connector: Box<dyn Connector>,
     ) -> Self {
         Self {
             config,
@@ -143,6 +166,7 @@ impl StratumV1Source {
             first_share_logged: false,
             expected_hashrate: HashRate::default(),
             last_suggested_difficulty: None,
+            connector,
         }
     }
 
@@ -306,7 +330,10 @@ impl StratumV1Source {
 
             ClientEvent::Disconnected => {
                 warn!("Disconnected from pool");
-                self.event_tx.send(SourceEvent::ClearJobs).await?;
+                // ClearJobs is sent by the reconnection loop after
+                // connect_and_run() returns, covering both this path
+                // and I/O errors where StratumV1Client exits without
+                // sending Disconnected.
             }
 
             ClientEvent::Error(err) => {
@@ -398,8 +425,8 @@ impl StratumV1Source {
     ///
     /// Defers pool connection until the scheduler provides a positive
     /// hashrate via `UpdateHashRate`, so `suggest_difficulty` always has a
-    /// meaningful value at connect time. Once connected, re-suggests when
-    /// hashrate changes materially (factor of 2).
+    /// meaningful value at connect time. Reconnects automatically with
+    /// exponential backoff when the connection drops.
     pub async fn run(mut self) -> Result<()> {
         info!(pool = %self.config.url, "Waiting for hashrate before connecting");
 
@@ -426,14 +453,50 @@ impl StratumV1Source {
             }
         }
 
-        // Phase 2: connect and run.
-        debug!(
-            pool = %self.config.url,
-            hashrate = %self.expected_hashrate,
-            "Hashrate available, connecting to pool"
-        );
+        // Phase 2: connect with automatic reconnection.
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60));
 
-        // Create channels for client communication
+        loop {
+            // Reset per-connection state so a fresh handshake starts clean.
+            self.state = None;
+            self.first_share_logged = false;
+
+            info!(pool = %self.config.url, "Connecting to pool");
+
+            let connected_at = tokio::time::Instant::now();
+            match self.connect_and_run().await {
+                ConnectOutcome::Shutdown => return Ok(()),
+                ConnectOutcome::Fatal(e) => {
+                    error!(error = %e, "Fatal pool error, not reconnecting");
+                    return Err(e);
+                }
+                ConnectOutcome::Disconnected => {
+                    // Invalidate stale work from the dead connection.
+                    if let Err(e) = self.event_tx.send(SourceEvent::ClearJobs).await {
+                        warn!(error = %e, "Failed to send ClearJobs");
+                    }
+                    if connected_at.elapsed() >= STABLE_CONNECTION_THRESHOLD {
+                        backoff.reset();
+                    }
+                    let delay = backoff.next_delay();
+                    info!(
+                        pool = %self.config.url,
+                        delay_secs = delay.as_secs_f64(),
+                        "Reconnecting after backoff"
+                    );
+                    if self.backoff_wait(delay).await {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run a single connection attempt through its full lifecycle.
+    ///
+    /// Creates channels, spawns the client task, runs the event loop
+    /// until disconnect or shutdown, and returns the outcome.
+    async fn connect_and_run(&mut self) -> ConnectOutcome {
         let (client_event_tx, mut client_event_rx) = mpsc::channel(100);
         let (client_command_tx, client_command_rx) = mpsc::channel(100);
 
@@ -442,8 +505,7 @@ impl StratumV1Source {
         let initial_difficulty = Self::compute_suggested_difficulty(self.expected_hashrate);
         self.last_suggested_difficulty = initial_difficulty;
 
-        // Create the Stratum client with command channel
-        let client = crate::stratum_v1::StratumV1Client::with_commands(
+        let client = StratumV1Client::with_commands(
             self.config.clone(),
             client_event_tx,
             client_command_rx,
@@ -451,13 +513,29 @@ impl StratumV1Source {
             initial_difficulty,
         );
 
-        // Spawn client task
-        let client_handle = tokio::spawn(async move { client.run().await });
+        let transport = tokio::select! {
+            result = self.connector.connect() => {
+                match result {
+                    Ok(t) => t,
+                    Err(e) => {
+                        if e.is_fatal() {
+                            return ConnectOutcome::Fatal(e.into());
+                        }
+                        warn!(error = %e, "Failed to connect");
+                        return ConnectOutcome::Disconnected;
+                    }
+                }
+            }
+            _ = self.shutdown.cancelled() => {
+                return ConnectOutcome::Shutdown;
+            }
+        };
+
+        let client_handle = tokio::spawn(async move { client.run_with_transport(transport).await });
 
         // Main event loop
         loop {
             tokio::select! {
-                // Events from Stratum client
                 event_opt = client_event_rx.recv() => {
                     match event_opt {
                         Some(event) => {
@@ -466,13 +544,12 @@ impl StratumV1Source {
                             }
                         }
                         None => {
-                            warn!("Client event channel closed (client task exited)");
+                            // Client task exited; check why below.
                             break;
                         }
                     }
                 }
 
-                // Commands from scheduler
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
                         SourceCommand::SubmitShare(share) => {
@@ -483,7 +560,6 @@ impl StratumV1Source {
                                 "Submitting share"
                             );
 
-                            // Convert share to Stratum format and send to client
                             match self.share_to_submit_params(share) {
                                 Ok(submit_params) => {
                                     if let Err(e) = client_command_tx.send(
@@ -505,19 +581,54 @@ impl StratumV1Source {
                     }
                 }
 
-                // Shutdown
                 _ = self.shutdown.cancelled() => {
-                    break;
+                    return ConnectOutcome::Shutdown;
                 }
             }
         }
 
-        // Wait for client to finish and propagate any errors
-        match client_handle.await? {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                warn!(error = %e, "Stratum client failed");
-                Err(e.into())
+        // Client task exited -- determine outcome from its return value.
+        match client_handle.await {
+            Ok(Ok(())) => ConnectOutcome::Shutdown,
+            Ok(Err(e)) => {
+                if e.is_fatal() {
+                    ConnectOutcome::Fatal(e.into())
+                } else {
+                    warn!(error = %e, "Disconnected from pool");
+                    ConnectOutcome::Disconnected
+                }
+            }
+            Err(join_err) => {
+                ConnectOutcome::Fatal(anyhow::anyhow!("Client task panicked: {}", join_err))
+            }
+        }
+    }
+
+    /// Wait for the given duration, draining commands in the meantime.
+    ///
+    /// Returns `true` if shutdown was requested during the wait.
+    async fn backoff_wait(&mut self, delay: Duration) -> bool {
+        let sleep = tokio::time::sleep(delay);
+        tokio::pin!(sleep);
+
+        loop {
+            tokio::select! {
+                _ = &mut sleep => {
+                    return false;
+                }
+                Some(cmd) = self.command_rx.recv() => {
+                    match cmd {
+                        SourceCommand::UpdateHashRate(rate) => {
+                            self.expected_hashrate = rate;
+                        }
+                        SourceCommand::SubmitShare(_) => {
+                            // No connection, drop silently.
+                        }
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    return true;
+                }
             }
         }
     }
