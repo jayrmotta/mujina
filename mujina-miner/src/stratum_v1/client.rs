@@ -424,13 +424,12 @@ impl StratumV1Client {
 
         match result {
             Ok(_) => {
-                debug!(difficulty, "Pool acknowledged suggest_difficulty");
+                trace!(difficulty, "Pool acknowledged suggest_difficulty");
             }
             Err(StratumError::Timeout) => {
-                debug!(
-                    difficulty,
-                    "Pool did not respond to suggest_difficulty (timeout)"
-                );
+                // Normal: most pools respond via a set_difficulty notification
+                // rather than a direct JSON-RPC reply to our request.
+                trace!(difficulty, "No direct reply to suggest_difficulty");
             }
             Err(e) => {
                 warn!(difficulty, error = %e, "suggest_difficulty failed");
