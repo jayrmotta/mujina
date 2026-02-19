@@ -743,7 +743,6 @@ impl Scheduler {
         // Create interval for periodic hashrate broadcasts to sources
         let mut hashrate_interval = tokio::time::interval(Duration::from_secs(10));
         hashrate_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut first_hashrate_tick = true;
 
         while !running.is_cancelled() {
             tokio::select! {
@@ -823,15 +822,8 @@ impl Scheduler {
                     self.handle_api_command(cmd, &miner_state_tx);
                 }
 
-                // Periodic state publishing and hashrate broadcast
+                // Periodic state publishing
                 _ = hashrate_interval.tick() => {
-                    if first_hashrate_tick {
-                        first_hashrate_tick = false;
-                    } else {
-                        let hashrate = self.operational_hashrate();
-                        let senders = self.hashrate_senders();
-                        broadcast_hashrate(senders, hashrate).await;
-                    }
                     let _ = miner_state_tx.send(self.compute_miner_state());
                 }
 
