@@ -423,14 +423,15 @@ impl StratumV1Source {
 
     /// Run the source (main event loop).
     ///
-    /// Defers pool connection until the scheduler provides a positive
-    /// hashrate via `UpdateHashRate`, so `suggest_difficulty` always has a
-    /// meaningful value at connect time. Reconnects automatically with
+    /// Defers pool connection until the scheduler reports a positive hashrate
+    /// via `UpdateHashRate`---no point fetching jobs if there are no hash
+    /// threads to work them. A secondary benefit: `suggest_difficulty` always
+    /// has a meaningful value at connect time. Reconnects automatically with
     /// exponential backoff when the connection drops.
     pub async fn run(mut self) -> Result<()> {
-        info!(pool = %self.config.url, "Waiting for hashrate before connecting");
+        info!(pool = %self.config.url, "Waiting for hash threads before connecting");
 
-        // Phase 1: wait for a positive hashrate before connecting.
+        // Phase 1: wait until hash threads are available before connecting.
         // Drain commands; only UpdateHashRate matters here.
         loop {
             tokio::select! {
