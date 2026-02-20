@@ -44,16 +44,13 @@ pub struct Frequency {
 
 impl Frequency {
     /// Minimum supported frequency in MHz
-    #[allow(dead_code)]
     pub const MIN_MHZ: f32 = 50.0;
     /// Maximum supported frequency in MHz
-    #[allow(dead_code)]
     pub const MAX_MHZ: f32 = 800.0;
     /// Base crystal frequency in MHz
-    const CRYSTAL_MHZ: f32 = 25.0;
+    pub const CRYSTAL_MHZ: f32 = 25.0;
 
     /// Create frequency from MHz value with validation
-    #[allow(dead_code)]
     pub fn from_mhz(mhz: f32) -> Result<Self, ProtocolError> {
         if !(Self::MIN_MHZ..=Self::MAX_MHZ).contains(&mhz) {
             return Err(ProtocolError::InvalidFrequency { mhz: mhz as u32 });
@@ -62,7 +59,6 @@ impl Frequency {
     }
 
     /// Get frequency in MHz
-    #[allow(dead_code)]
     pub fn mhz(&self) -> f32 {
         self.mhz
     }

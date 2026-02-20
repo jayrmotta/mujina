@@ -243,8 +243,8 @@ mod tests {
         let diff_a = Difficulty::from(500_u64);
         let diff_b = Difficulty::from(500_u64);
         assert_eq!(diff_a, diff_b);
-        assert!(!(diff_a > diff_b));
-        assert!(!(diff_a < diff_b));
+        assert!(diff_a <= diff_b);
+        assert!(diff_a >= diff_b);
     }
 
     #[test]

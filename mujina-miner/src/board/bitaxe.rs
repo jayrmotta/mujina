@@ -4,15 +4,18 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, ReadBuf},
-    sync::{Mutex, watch},
+    sync::{Mutex, mpsc, oneshot, watch},
     time,
 };
 use tokio_stream::StreamExt;
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::{
+    codec::{FramedRead, FramedWrite},
+    sync::CancellationToken,
+};
 
 use crate::{
     api_client::types::{BoardState, Fan, PowerMeasurement, TemperatureSensor},
@@ -22,6 +25,7 @@ use crate::{
         hash_thread::{BoardPeripherals, HashThread, ThreadRemovalSignal},
     },
     hw_trait::{
+        HwError,
         gpio::{Gpio, GpioPin, PinValue},
         i2c::I2c,
     },
@@ -36,6 +40,10 @@ use crate::{
         emc2101::{Emc2101, Percent},
         tps546::{Tps546, Tps546Config},
     },
+    thermal::{
+        FanPIDController, FanSpeedCommand, FrequencyCommand, TemperatureFilter, ThermalConfig,
+        ThermalController,
+    },
     tracing::prelude::*,
     transport::serial::{SerialControl, SerialReader, SerialStream, SerialWriter},
 };
@@ -45,10 +53,51 @@ use super::{
     pattern::{Match, StringMatch},
 };
 
+const TEMPERATURE_READING_INTERVAL: Duration = Duration::from_secs(3);
+const TEMPERATURE_READ_TIMEOUT: Duration = Duration::from_millis(750);
+const TEMPERATURE_MOVING_AVG_WINDOW: u8 = 5;
+const TEMPERATURE_NOISE_THRESHOLD_C: f32 = 15.0;
+
+const FAN_SPEED_WRITE_TIMEOUT: Duration = Duration::from_millis(750);
+const THERMAL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+const FAN_PID_PROPORTIONAL: f32 = 1.0;
+const FAN_PID_INTEGRAL_INIT: f32 = 0.1;
+const FAN_PID_INTEGRAL_COEFF: f32 = 0.1;
+const FAN_PID_INTEGRAL_MIN: f32 = -10.0;
+const FAN_PID_INTEGRAL_MAX: f32 = 10.0;
+
+const FREQUENCY_COMMAND_QUEUE_CAPACITY: u8 = 8;
+
 /// Adapter implementing `AsicEnable` for Bitaxe's GPIO-based reset control.
 struct BitaxeAsicEnable {
     /// Reset pin (directly controls nRST on the BM1370)
     nrst_pin: BitaxeRawGpioPin,
+}
+
+#[derive(Debug)]
+enum FanWorkerCommand {
+    SetSpeed {
+        percent: Percent,
+        respond_to: oneshot::Sender<crate::hw_trait::Result<()>>,
+    },
+    ReadExternalTemp {
+        respond_to: oneshot::Sender<crate::hw_trait::Result<f32>>,
+    },
+    GetFanSpeed {
+        respond_to: oneshot::Sender<crate::hw_trait::Result<Percent>>,
+    },
+    GetTachCount {
+        respond_to: oneshot::Sender<crate::hw_trait::Result<u16>>,
+    },
+    GetRpm {
+        respond_to: oneshot::Sender<crate::hw_trait::Result<u32>>,
+    },
+}
+
+struct FanWorkerHandle {
+    tx: mpsc::Sender<FanWorkerCommand>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 #[async_trait]
@@ -122,8 +171,8 @@ pub struct BitaxeBoard {
     asic_nrst: Option<BitaxeRawGpioPin>,
     /// I2C bus controller
     i2c: BitaxeRawI2c,
-    /// Fan controller (board-controlled only, not shared with thread)
-    fan_controller: Option<Emc2101<BitaxeRawI2c>>,
+    /// Fan controller worker (serializes EMC2101 access)
+    fan_worker: Option<FanWorkerHandle>,
     /// Voltage regulator (shared with thread, cached state)
     regulator: Option<Arc<Mutex<Tps546<BitaxeRawI2c>>>>,
     /// Writer for sending commands to chips (transferred to hash thread)
@@ -141,12 +190,43 @@ pub struct BitaxeBoard {
     stats_task_handle: Option<tokio::task::JoinHandle<()>>,
     /// Serial number from USB device info
     serial_number: Option<String>,
+    /// Frequency command channel (for thermal control)
+    frequency_command_tx: Option<mpsc::Sender<FrequencyCommand>>,
+    frequency_command_rx: Option<mpsc::Receiver<FrequencyCommand>>,
+    /// Thermal controller cancellation token
+    thermal_cancellation: Option<tokio_util::sync::CancellationToken>,
+    /// Thermal task handles for cleanup
+    thermal_task_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Thermal configuration
+    thermal_config: ThermalConfig,
     /// Channel for publishing board state to the API server.
     /// Taken by `spawn_stats_monitor` which publishes periodic snapshots.
     state_tx: Option<watch::Sender<BoardState>>,
 }
 
 impl BitaxeBoard {
+    async fn fan_worker_request<T>(
+        fan_tx: &mpsc::Sender<FanWorkerCommand>,
+        timeout: Duration,
+        make_cmd: impl FnOnce(oneshot::Sender<crate::hw_trait::Result<T>>) -> FanWorkerCommand,
+    ) -> crate::hw_trait::Result<T> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        if fan_tx.send(make_cmd(resp_tx)).await.is_err() {
+            return Err(HwError::Other("Fan worker channel closed".to_string()));
+        }
+
+        match tokio::time::timeout(timeout, resp_rx).await {
+            Ok(recv_result) => match recv_result {
+                Ok(make_cmd_result) => make_cmd_result,
+                Err(_) => Err(HwError::Other("Fan worker response dropped".into())),
+            },
+            Err(_) => Err(HwError::Timeout),
+        }
+    }
+
+    fn fan_worker_tx(&self) -> Option<mpsc::Sender<FanWorkerCommand>> {
+        self.fan_worker.as_ref().map(|worker| worker.tx.clone())
+    }
     /// GPIO pin number for ASIC reset control (active low)
     const ASIC_RESET_PIN: u8 = 0;
 
@@ -189,11 +269,13 @@ impl BitaxeBoard {
         // Wrap the data reader with tracing
         let tracing_reader = TracingReader::new(data_reader, "Data");
 
+        let (frequency_tx, frequency_rx) = mpsc::channel(FREQUENCY_COMMAND_QUEUE_CAPACITY as usize);
+
         Ok(BitaxeBoard {
             control_channel,
             asic_nrst: None,
             i2c,
-            fan_controller: None,
+            fan_worker: None,
             regulator: None,
             data_writer: Some(FramedWrite::new(data_writer, bm13xx::FrameCodec)),
             data_reader: Some(FramedRead::new(tracing_reader, bm13xx::FrameCodec)),
@@ -202,6 +284,11 @@ impl BitaxeBoard {
             thread_shutdown: None,
             stats_task_handle: None,
             serial_number,
+            frequency_command_tx: Some(frequency_tx),
+            frequency_command_rx: Some(frequency_rx),
+            thermal_cancellation: None,
+            thermal_task_handles: Vec::new(),
+            thermal_config: ThermalConfig::default(),
             state_tx: Some(state_tx),
         })
     }
@@ -469,17 +556,80 @@ impl BitaxeBoard {
         // Initialize the EMC2101
         match fan.init().await {
             Ok(()) => {
-                // Set fan to full speed until closed-loop control is implemented
-                match fan.set_fan_speed(Percent::FULL).await {
-                    Ok(()) => {
-                        debug!("Fan speed set to 100%");
-                    }
-                    Err(e) => {
-                        warn!("Failed to set fan speed: {}", e);
-                    }
-                }
+                let fan_read_timeout = TEMPERATURE_READ_TIMEOUT;
+                let fan_write_timeout = FAN_SPEED_WRITE_TIMEOUT;
+                let (fan_tx, mut fan_rx) = mpsc::channel(32);
 
-                self.fan_controller = Some(fan);
+                let task = tokio::spawn(async move {
+                    let mut fan = fan;
+                    while let Some(command) = fan_rx.recv().await {
+                        match command {
+                            FanWorkerCommand::SetSpeed {
+                                percent,
+                                respond_to,
+                            } => {
+                                trace!(speed_pct = %u8::from(percent), "Setting fan speed");
+                                let result = tokio::time::timeout(
+                                    fan_write_timeout,
+                                    fan.set_fan_speed(percent),
+                                )
+                                .await;
+                                let response = match result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(HwError::Timeout),
+                                };
+                                let _ = respond_to.send(response);
+                            }
+                            FanWorkerCommand::ReadExternalTemp { respond_to } => {
+                                trace!("Reading external temperature");
+                                let result = tokio::time::timeout(
+                                    fan_read_timeout,
+                                    fan.get_external_temperature(),
+                                )
+                                .await;
+                                let response = match result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(HwError::Timeout),
+                                };
+                                let _ = respond_to.send(response);
+                            }
+                            FanWorkerCommand::GetFanSpeed { respond_to } => {
+                                trace!("Reading fan speed");
+                                let result =
+                                    tokio::time::timeout(fan_read_timeout, fan.get_fan_speed())
+                                        .await;
+                                let response = match result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(HwError::Timeout),
+                                };
+                                let _ = respond_to.send(response);
+                            }
+                            FanWorkerCommand::GetTachCount { respond_to } => {
+                                trace!("Reading TACH count");
+                                let result =
+                                    tokio::time::timeout(fan_read_timeout, fan.get_tach_count())
+                                        .await;
+                                let response = match result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(HwError::Timeout),
+                                };
+                                let _ = respond_to.send(response);
+                            }
+                            FanWorkerCommand::GetRpm { respond_to } => {
+                                trace!("Reading fan RPM");
+                                let result =
+                                    tokio::time::timeout(fan_read_timeout, fan.get_rpm()).await;
+                                let response = match result {
+                                    Ok(res) => res,
+                                    Err(_) => Err(HwError::Timeout),
+                                };
+                                let _ = respond_to.send(response);
+                            }
+                        }
+                    }
+                });
+
+                self.fan_worker = Some(FanWorkerHandle { tx: fan_tx, task });
                 Ok(())
             }
             Err(e) => {
@@ -633,6 +783,9 @@ impl BitaxeBoard {
         self.init_fan_controller().await?;
         self.init_power_controller().await?;
 
+        // Setup thermal controller after fan controller is available
+        self.setup_thermal_controller()?;
+
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Phase 3: Release ASIC from reset for discovery
@@ -689,16 +842,232 @@ impl BitaxeBoard {
         self.chip_infos.len()
     }
 
-    /// Spawn a task to periodically log and publish board telemetry.
-    fn spawn_stats_monitor(&mut self) {
-        // Clone data needed for the monitoring task
-        let i2c = self.i2c.clone();
+    /// Get temperature from EMC2101 fan controller.
+    ///
+    /// # Returns
+    /// Temperature in Celsius, or an error if the fan controller is not available
+    /// or if the temperature read fails.
+    #[expect(
+        dead_code,
+        reason = "Public API method for external thermal control integration"
+    )]
+    pub async fn get_temperature(&mut self) -> Result<f32, BoardError> {
+        let fan_tx = self.fan_worker_tx().ok_or_else(|| {
+            BoardError::HardwareControl("Fan controller not available".to_string())
+        })?;
+        let timeout = TEMPERATURE_READ_TIMEOUT;
+        Self::fan_worker_request(&fan_tx, timeout, |respond_to| {
+            FanWorkerCommand::ReadExternalTemp { respond_to }
+        })
+        .await
+        .map_err(|e| BoardError::HardwareControl(format!("Failed to read temperature: {}", e)))
+    }
 
+    /// Set fan speed on EMC2101 fan controller.
+    ///
+    /// # Arguments
+    /// * `speed_percent` - Fan speed as a percentage (0-100)
+    ///
+    /// # Returns
+    /// An error if the fan controller is not available or if setting the fan speed fails.
+    #[expect(
+        dead_code,
+        reason = "Public API method for external thermal control integration"
+    )]
+    pub async fn set_fan_speed(&mut self, speed_percent: u8) -> Result<(), BoardError> {
+        let percent = Percent::try_from(speed_percent)
+            .map_err(|e| BoardError::HardwareControl(format!("Invalid fan speed: {}", e)))?;
+        let fan_tx = self.fan_worker_tx().ok_or_else(|| {
+            BoardError::HardwareControl("Fan controller not available".to_string())
+        })?;
+
+        let timeout = FAN_SPEED_WRITE_TIMEOUT;
+        Self::fan_worker_request(&fan_tx, timeout, |respond_to| FanWorkerCommand::SetSpeed {
+            percent,
+            respond_to,
+        })
+        .await
+        .map_err(|e| BoardError::HardwareControl(format!("Failed to set fan speed: {}", e)))
+    }
+
+    /// Get the frequency command channel sender.
+    ///
+    /// This channel can be used by thermal controllers to send frequency adjustment
+    /// commands to the board.
+    ///
+    /// # Returns
+    /// The sender for frequency commands, or None if thermal control is not available.
+    #[expect(
+        dead_code,
+        reason = "Public API method for external thermal control integration"
+    )]
+    pub fn get_frequency_command_tx(&self) -> Option<mpsc::Sender<FrequencyCommand>> {
+        self.frequency_command_tx.clone()
+    }
+
+    async fn run_temperature_reader(
+        fan_tx: mpsc::Sender<FanWorkerCommand>,
+        temperature_tx: watch::Sender<Option<f32>>,
+        cancellation: CancellationToken,
+    ) {
+        let mut interval = tokio::time::interval(TEMPERATURE_READING_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut filter =
+            TemperatureFilter::new(TEMPERATURE_MOVING_AVG_WINDOW, TEMPERATURE_NOISE_THRESHOLD_C);
+
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = interval.tick() => {
+                    let read_start = Instant::now();
+                    let read_result = Self::fan_worker_request(
+                        &fan_tx,
+                        TEMPERATURE_READ_TIMEOUT,
+                        |respond_to| FanWorkerCommand::ReadExternalTemp { respond_to },
+                    )
+                    .await;
+
+                    match read_result {
+                        Ok(temp) => {
+                            if let Some(accepted) = filter.consider(temp) {
+                                debug!(temp_c = %accepted, "Temperature reading");
+                                if let Err(e) = temperature_tx.send(Some(accepted)) {
+                                    warn!("Temperature watch channel closed: {}", e);
+                                    break;
+                                }
+                            } else {
+                                debug!(temp_c = %temp, "Skipping noisy temperature reading");
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                elapsed_ms = %read_start.elapsed().as_millis(),
+                                "Failed to read temperature: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_fan_speed_listener(
+        fan_tx: mpsc::Sender<FanWorkerCommand>,
+        mut fan_speed_rx: watch::Receiver<FanSpeedCommand>,
+        cancellation: CancellationToken,
+    ) {
+        let mut last_speed: Option<u8> = None;
+
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    break;
+                }
+                result = fan_speed_rx.changed() => {
+                    if result.is_err() {
+                        debug!("Fan speed watch sender dropped");
+                        break;
+                    }
+
+                    let FanSpeedCommand { speed_percent } = *fan_speed_rx.borrow();
+                    if last_speed == Some(speed_percent) {
+                        continue;
+                    }
+
+                    let percent = match Percent::try_from(speed_percent) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!("Invalid fan speed percentage: {}", e);
+                            continue;
+                        }
+                    };
+
+                    debug!(speed_pct = %speed_percent, "Setting fan speed");
+                    let set_result = Self::fan_worker_request(
+                        &fan_tx,
+                        FAN_SPEED_WRITE_TIMEOUT,
+                        |respond_to| FanWorkerCommand::SetSpeed {
+                            percent,
+                            respond_to,
+                        },
+                    )
+                    .await;
+
+                    match set_result {
+                        Ok(()) => {
+                            last_speed = Some(speed_percent);
+                        }
+                        Err(e) => {
+                            warn!("Failed to set fan speed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn setup_thermal_controller(&mut self) -> Result<(), BoardError> {
+        let Some(fan_tx) = self.fan_worker_tx() else {
+            debug!("Skipping thermal controller setup: fan controller not available");
+            return Ok(());
+        };
+        let frequency_tx = self.frequency_command_tx.clone().ok_or_else(|| {
+            BoardError::HardwareControl("Frequency command channel not available".into())
+        })?;
+
+        let cancellation = CancellationToken::new();
+        self.thermal_cancellation = Some(cancellation.clone());
+
+        let (temperature_tx, temperature_rx) = watch::channel(None::<f32>);
+        let (fan_speed_tx, fan_speed_rx) = watch::channel(FanSpeedCommand { speed_percent: 0 });
+
+        self.thermal_task_handles
+            .push(tokio::spawn(Self::run_temperature_reader(
+                fan_tx.clone(),
+                temperature_tx,
+                cancellation.clone(),
+            )));
+
+        self.thermal_task_handles
+            .push(tokio::spawn(Self::run_fan_speed_listener(
+                fan_tx,
+                fan_speed_rx,
+                cancellation.clone(),
+            )));
+
+        let controller = ThermalController::new(
+            self.thermal_config.clone(),
+            FanPIDController::new(
+                FAN_PID_PROPORTIONAL,
+                FAN_PID_INTEGRAL_INIT,
+                FAN_PID_INTEGRAL_COEFF,
+                FAN_PID_INTEGRAL_MIN,
+                FAN_PID_INTEGRAL_MAX,
+            ),
+            fan_speed_tx,
+            frequency_tx,
+            temperature_rx,
+        );
+        self.thermal_task_handles.push(tokio::spawn(async move {
+            controller.run(cancellation).await;
+        }));
+
+        debug!("Thermal controller setup complete");
+        Ok(())
+    }
+
+    /// Spawn a task to periodically log management statistics
+    fn spawn_stats_monitor(&mut self) {
         // Clone the regulator Arc for stats monitoring
         let regulator = self
             .regulator
             .clone()
             .expect("Regulator must be initialized before spawning stats monitor");
+
+        // Clone the fan worker sender for stats monitoring (if available)
+        let fan_tx = self.fan_worker_tx();
+        let fan_read_timeout = TEMPERATURE_READ_TIMEOUT;
 
         // Capture board info for logging
         let board_info = self.board_info();
@@ -720,40 +1089,91 @@ impl BitaxeBoard {
             let mut interval = tokio::time::interval(STATS_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            // Create fan controller for the stats task
-            let mut fan_ctrl = Emc2101::new(i2c);
+            // Discard first tick (fires immediately, ADC readings may not be settled)
+            interval.tick().await;
 
             const LOG_INTERVAL: Duration = Duration::from_secs(30);
             let mut last_log = tokio::time::Instant::now();
 
-            // Discard first tick (fires immediately, ADC readings may not be settled)
-            interval.tick().await;
-
             loop {
                 interval.tick().await;
 
-                // -- Read sensor values --
-
-                let asic_temp = fan_ctrl.get_external_temperature().await.ok();
-                let fan_percent = fan_ctrl.get_fan_speed().await.ok().map(u8::from);
-                let fan_rpm = fan_ctrl.get_rpm().await.ok();
-
-                let (vin_mv, vout_mv, iout_ma, power_mw, vr_temp) = {
-                    let mut reg = regulator.lock().await;
-                    (
-                        reg.get_vin().await.ok(),
-                        reg.get_vout().await.ok(),
-                        reg.get_iout().await.ok(),
-                        reg.get_power().await.ok(),
-                        reg.get_temperature().await.ok(),
-                    )
+                // Read temperature (ASIC / external sensor)
+                let asic_temp: Option<f32> = if let Some(ref fan_tx) = fan_tx {
+                    Self::fan_worker_request(fan_tx, fan_read_timeout, |respond_to| {
+                        FanWorkerCommand::ReadExternalTemp { respond_to }
+                    })
+                    .await
+                    .ok()
+                } else {
+                    None
                 };
 
-                if let Some(mv) = vout_mv {
-                    let volts = mv as f32 / 1000.0;
-                    if volts < 1.0 {
-                        warn!("Core voltage low: {:.3}V", volts);
+                // Read fan speed
+                let fan_percent: Option<u8> = if let Some(ref fan_tx) = fan_tx {
+                    Self::fan_worker_request(fan_tx, fan_read_timeout, |respond_to| {
+                        FanWorkerCommand::GetFanSpeed { respond_to }
+                    })
+                    .await
+                    .ok()
+                    .map(u8::from)
+                } else {
+                    None
+                };
+
+                // Read fan RPM (if TACH is connected)
+                let fan_rpm: Option<u32> = if let Some(ref fan_tx) = fan_tx {
+                    match Self::fan_worker_request(fan_tx, fan_read_timeout, |respond_to| {
+                        FanWorkerCommand::GetTachCount { respond_to }
+                    })
+                    .await
+                    {
+                        Ok(count) => {
+                            trace!("TACH count: 0x{:04x}", count);
+                            Self::fan_worker_request(fan_tx, fan_read_timeout, |respond_to| {
+                                FanWorkerCommand::GetRpm { respond_to }
+                            })
+                            .await
+                            .ok()
+                        }
+                        Err(e) => {
+                            trace!("Failed to read TACH: {}", e);
+                            None
+                        }
                     }
+                } else {
+                    None
+                };
+
+                // Read power stats using the shared regulator
+                let vin_mv: Option<u32> = regulator.lock().await.get_vin().await.ok();
+
+                let vout_mv: Option<u32> =
+                    regulator.lock().await.get_vout().await.ok().inspect(|&mv| {
+                        let volts = mv as f32 / 1000.0;
+                        if volts < 1.0 {
+                            warn!("Core voltage low: {:.3}V", volts);
+                        }
+                    });
+
+                let iout_ma: Option<u32> = regulator.lock().await.get_iout().await.ok();
+
+                let power_mw: Option<u32> = regulator.lock().await.get_power().await.ok();
+
+                let vr_temp: Option<i32> = regulator.lock().await.get_temperature().await.ok();
+
+                // Check power status - critical faults will return error
+                if let Err(e) = regulator.lock().await.check_status().await {
+                    error!("CRITICAL: Power controller fault detected: {}", e);
+
+                    // Try to clear the fault once
+                    warn!("Attempting to clear power controller faults...");
+                    if let Err(clear_err) = regulator.lock().await.clear_faults().await {
+                        error!("Failed to clear faults: {}", clear_err);
+                    }
+
+                    // Continue monitoring
+                    continue;
                 }
 
                 // Check power status -- critical faults will return error
@@ -856,6 +1276,26 @@ impl Board for BitaxeBoard {
             }
         }
 
+        // Cancel thermal tasks
+        if let Some(ref cancellation) = self.thermal_cancellation {
+            cancellation.cancel();
+        }
+
+        // Wait for thermal tasks to complete
+        let shutdown_timeout = THERMAL_SHUTDOWN_TIMEOUT;
+        for mut handle in self.thermal_task_handles.drain(..) {
+            if tokio::time::timeout(shutdown_timeout, &mut handle)
+                .await
+                .is_err()
+            {
+                warn!(
+                    timeout_ms = %shutdown_timeout.as_millis(),
+                    "Thermal task shutdown timed out; aborting"
+                );
+                handle.abort();
+            }
+        }
+
         // Hold chips in reset
         self.hold_in_reset().await?;
 
@@ -868,11 +1308,25 @@ impl Board for BitaxeBoard {
         }
 
         // Reduce fan speed (no more heat generation)
-        if let Some(ref mut fan) = self.fan_controller {
+        if let Some(ref fan_worker) = self.fan_worker {
             let shutdown_speed = Percent::new_clamped(25);
-            if let Err(e) = fan.set_fan_speed(shutdown_speed).await {
-                warn!("Failed to set fan speed: {}", e);
+            let speed_result =
+                Self::fan_worker_request(&fan_worker.tx, FAN_SPEED_WRITE_TIMEOUT, |respond_to| {
+                    FanWorkerCommand::SetSpeed {
+                        percent: shutdown_speed,
+                        respond_to,
+                    }
+                })
+                .await;
+
+            if let Err(e) = speed_result {
+                warn!("Failed to set fan speed during shutdown: {}", e);
             }
+        }
+
+        // Stop fan worker
+        if let Some(worker) = self.fan_worker.take() {
+            worker.task.abort();
         }
 
         // Cancel the statistics monitoring task
@@ -926,13 +1380,17 @@ impl Board for BitaxeBoard {
             None => "Bitaxe-Gamma".to_string(),
         };
 
-        // Create BM13xxThread with streams and peripherals
+        let frequency_command_rx = self.frequency_command_rx.take();
+        let operating_frequency_mhz = self.thermal_config.operating_frequency_mhz;
+
         let thread = BM13xxThread::new(
             thread_name,
             data_reader,
             data_writer,
             peripherals,
             removal_rx,
+            frequency_command_rx,
+            operating_frequency_mhz,
         );
 
         debug!("Created BM13xx hash thread from BitaxeBoard");
