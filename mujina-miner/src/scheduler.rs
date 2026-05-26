@@ -787,6 +787,20 @@ impl Scheduler {
                         SourceEvent::ClearJobs => {
                             self.handle_clear_jobs(source_id, &mut share_channels);
                         }
+
+                        SourceEvent::SharesAccepted(count) => {
+                            debug!(
+                                source = %source_name,
+                                count,
+                                "Shares accepted by pool"
+                            );
+                            self.stats.shares_accepted += u64::from(count);
+                        }
+
+                        SourceEvent::SharesRejected => {
+                            debug!(source = %source_name, "Share rejected by pool");
+                            self.stats.shares_rejected += 1;
+                        }
                     }
                 }
 
@@ -932,6 +946,8 @@ fn format_duration(secs: u64) -> String {
 struct MiningStats {
     start_time: std::time::Instant,
     shares_submitted: u64,
+    shares_accepted: u64,
+    shares_rejected: u64,
 }
 
 impl Default for MiningStats {
@@ -939,6 +955,8 @@ impl Default for MiningStats {
         Self {
             start_time: std::time::Instant::now(),
             shares_submitted: 0,
+            shares_accepted: 0,
+            shares_rejected: 0,
         }
     }
 }
@@ -956,7 +974,9 @@ impl MiningStats {
         info!(
             uptime = %format_duration(elapsed.as_secs()),
             hashrate = %hashrate_str,
-            shares = self.shares_submitted,
+            shares_submitted = self.shares_submitted,
+            shares_accepted = self.shares_accepted,
+            shares_rejected = self.shares_rejected,
             "Mining status."
         );
     }
