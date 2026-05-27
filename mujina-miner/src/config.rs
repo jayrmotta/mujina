@@ -114,10 +114,11 @@ impl PoolEndpoint {
             // Reject extra path segments (e.g. /key/worker) — the authority
             // key must be a single path component with no further slashes.
             if key_segment.contains('/') {
-                return Err(ParseEndpointError::InvalidAuthorityKey(format!(
+                return Err(ParseEndpointError::InvalidAuthorityKey(
                     "unexpected path segments after key; \
                      expected stratum2+tcp://host:port/<key>"
-                )));
+                        .to_string(),
+                ));
             }
             let (host, port) = parse_host_port(host_port)?;
             let authority_pubkey = key_segment
