@@ -6,6 +6,30 @@
 //!
 //! The thread is implemented as an actor task that monitors the serial bus for
 //! chip responses, filters shares, and manages work assignment.
+//!
+//! # Nonce search-space geometry
+//!
+//! Bitcoin mining exhausts a multi-dimensional search space:
+//!
+//! - **nonce** (2^32): rolled entirely in hardware by the BM13xx cores.
+//! - **version** (up to 2^16): rolled in hardware via BIP-320 version-rolling
+//!   bits; enabled by writing the VersionMask register during chip init.
+//! - **ntime**: rolled forward in software by this module's `ntime_ticker`
+//!   (once per second). Bitcoin consensus allows up to ~+2 h ahead of real time.
+//! - **extranonce2**: rolled in software by the scheduler, giving additional
+//!   entropy when nonce × version × ntime space is exhausted.
+//!
+//! See [ESP-Miner PR #420](https://github.com/bitaxeorg/ESP-Miner/pull/420)
+//! for an exhaustion analysis across hashrate and chip-count combinations.
+//!
+//! # HCN register (register 0x10)
+//!
+//! The Hash Counting Number register controls how many nonces each big core
+//! scans per job. Its value is computed from chip count, big-core count, and
+//! clock frequency by [`protocol::NonceRangeConfig::computed`]. The frequency
+//! is currently fixed at 525 MHz (Bitaxe Gamma target); when PLL frequency
+//! becomes a runtime knob, the `initialize_chip` call site must be updated to
+//! pass the live frequency.
 
 use std::cmp::max;
 use std::sync::{Arc, RwLock};
