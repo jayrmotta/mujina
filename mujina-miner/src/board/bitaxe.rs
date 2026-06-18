@@ -155,6 +155,18 @@ async fn create_from_usb(device: UsbDeviceInfo) -> Result<BackplaneConnector> {
         );
     }
 
+    // Derive HCN register parameters from the discovered chain.
+    // core_count is the big-core count (HCN divisor), not the small-engine count.
+    // Falls back to 128 for unknown chip types (the BM1370 value).
+    let chip_type = bm13xx::protocol::ChipType::from(
+        chip_infos
+            .first()
+            .map(|c| c.chip_id)
+            .unwrap_or([0x13, 0x70]),
+    );
+    let core_count = chip_type.core_count().unwrap_or(128);
+    let chip_count = chip_infos.len();
+
     // Put chip back in reset before handing off to hash thread
     reset_pin.write(PinValue::Low).await?;
 
@@ -182,6 +194,8 @@ async fn create_from_usb(device: UsbDeviceInfo) -> Result<BackplaneConnector> {
         data_writer,
         peripherals,
         thread_shutdown_rx,
+        chip_count,
+        core_count,
     );
     let threads: Vec<Box<dyn HashThread>> = vec![Box::new(thread)];
 

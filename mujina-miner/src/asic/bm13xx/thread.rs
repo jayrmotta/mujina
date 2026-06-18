@@ -114,23 +114,27 @@ pub struct BM13xxThread {
 }
 
 impl BM13xxThread {
-    /// Create a new BM13xx thread with Stream/Sink for chip communication
+    /// Create a new BM13xx thread with Stream/Sink for chip communication.
     ///
-    /// Thread starts with chip disabled. Chip will be initialized when first
-    /// work is assigned.
+    /// Thread starts with chip disabled. Chip is initialized when first work
+    /// is assigned.
     ///
     /// # Arguments
-    /// * `name` - Human-readable name for logging (e.g., "Bitaxe Gamma (e2f56f9b)")
-    /// * `chip_responses` - Stream of decoded responses from chips
+    /// * `name`          - Human-readable name for logging (e.g., "Bitaxe Gamma (e2f56f9b)")
+    /// * `chip_responses`- Stream of decoded responses from chips
     /// * `chip_commands` - Sink for sending encoded commands to chips
-    /// * `peripherals` - Hardware interfaces from board (enable, regulator, etc.)
-    /// * `removal_rx` - Watch channel for board-triggered removal
+    /// * `peripherals`   - Hardware interfaces from board (enable, regulator, etc.)
+    /// * `removal_rx`    - Watch channel for board-triggered removal
+    /// * `chip_count`    - Number of chips in the chain (used to compute the HCN register)
+    /// * `core_count`    - Big-core count from [`protocol::ChipType::core_count`] (HCN divisor)
     pub fn new<R, W>(
         name: String,
         chip_responses: R,
         chip_commands: W,
         peripherals: BoardPeripherals,
         removal_rx: watch::Receiver<ThreadRemovalSignal>,
+        chip_count: usize,
+        core_count: u32,
     ) -> Self
     where
         R: Stream<Item = Result<protocol::Response, std::io::Error>> + Unpin + Send + 'static,
@@ -153,6 +157,8 @@ impl BM13xxThread {
                 chip_responses,
                 chip_commands,
                 peripherals,
+                chip_count,
+                core_count,
             )
             .await;
         });
@@ -245,6 +251,8 @@ async fn initialize_chip<W>(
     chip_commands: &mut W,
     peripherals: &mut BoardPeripherals,
     asic_difficulty: Log2Difficulty,
+    chip_count: usize,
+    core_count: u32,
 ) -> Result<()>
 where
     W: Sink<protocol::Command> + Unpin,
@@ -454,10 +462,17 @@ where
     debug!("Frequency ramping complete");
 
     // Final configuration
+    // HCN register: computed from chain topology and clock frequency.
+    // Frequency is currently fixed at the BM1370 target; update this call
+    // site when PLL frequency becomes a runtime knob.
     send_reg(
         chip_commands,
         true,
-        Register::NonceRange(protocol::NonceRangeConfig::from_raw(0xB51E0000)),
+        Register::NonceRange(protocol::NonceRangeConfig::computed(
+            core_count,
+            chip_count as u32,
+            525.0,
+        )),
     )
     .await?;
     send_reg(
@@ -602,6 +617,7 @@ fn calculate_pll_for_frequency(target_freq: f32) -> Option<protocol::PllConfig> 
 ///
 /// Chip is disabled on startup to establish known state. Chip is enabled and
 /// configured when scheduler assigns first work.
+#[allow(clippy::too_many_arguments)] // internal actor; all args are distinct hardware concerns
 async fn bm13xx_thread_actor<R, W>(
     mut cmd_rx: mpsc::Receiver<ThreadCommand>,
     evt_tx: mpsc::Sender<HashThreadEvent>,
@@ -610,6 +626,8 @@ async fn bm13xx_thread_actor<R, W>(
     mut chip_responses: R,
     mut chip_commands: W,
     mut peripherals: BoardPeripherals,
+    chip_count: usize,
+    core_count: u32,
 ) where
     R: Stream<Item = Result<protocol::Response, std::io::Error>> + Unpin,
     W: Sink<protocol::Command> + Unpin,
@@ -680,7 +698,7 @@ async fn bm13xx_thread_actor<R, W>(
 
                         if !chip_initialized {
                             trace!("Initializing chip on first assignment.");
-                            if let Err(e) = initialize_chip(&mut chip_commands, &mut peripherals, asic_difficulty).await {
+                            if let Err(e) = initialize_chip(&mut chip_commands, &mut peripherals, asic_difficulty, chip_count, core_count).await {
                                 error!(error = %e, "Chip initialization failed");
                                 response_tx.send(Err(e)).ok();
                                 continue;
@@ -730,7 +748,7 @@ async fn bm13xx_thread_actor<R, W>(
 
                         if !chip_initialized {
                             trace!("Initializing chip on first assignment.");
-                            if let Err(e) = initialize_chip(&mut chip_commands, &mut peripherals, asic_difficulty).await {
+                            if let Err(e) = initialize_chip(&mut chip_commands, &mut peripherals, asic_difficulty, chip_count, core_count).await {
                                 error!(error = %e, "Chip initialization failed");
                                 response_tx.send(Err(e)).ok();
                                 continue;
