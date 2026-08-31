@@ -188,10 +188,15 @@ impl ChipType {
         }
     }
 
-    /// Get expected hash engine count for this chip type, if known
+    /// Big-core count used as the divisor in the HCN nonce-range formula.
+    ///
+    /// This is the number of *big* (domain-level) cores, not the small-core
+    /// count. ESP-Miner `device_config.h` calls this `core_count = 128` for the
+    /// BM1370; the 2040 small engines are a separate field and are not used here.
+    /// See [`NonceRangeConfig::computed`].
     pub fn core_count(&self) -> Option<u32> {
         match self {
-            Self::BM1370 => Some(2048), // 128 x 16; esp-miner uses 2040
+            Self::BM1370 => Some(128), // big cores; divisor in HCN formula (ESP-Miner device_config.h core_count)
             _ => None,
         }
     }
@@ -215,11 +220,21 @@ impl From<ChipType> for [u8; 2] {
     }
 }
 
-/// Nonce range configuration for work distribution.
+/// Hash Counting Number (HCN) register — controls nonce search-space per chip.
 ///
-/// NOTE: We store this as a byte array rather than interpreting it as a u32
-/// because the exact bit-level interpretation is still being reverse-engineered.
-/// The values below are empirically observed from production hardware.
+/// Register 0x10 sets how many nonces each big core scans before the chip
+/// considers a job complete and wraps back to zero. Setting it too small
+/// skips part of the 32-bit nonce space; the formula in [`NonceRangeConfig::computed`]
+/// derives the correct value from the chip topology and clock frequency.
+///
+/// `computed()` implements the formula from ESP-Miner `bm1370.c`
+/// (`BM1370_set_nonce_space`), which is the authoritative reference for the
+/// BM1370.  `multi_chip()` is an older empirical lookup preserved for
+/// reference and protocol captures.
+///
+/// Note: [`ChipType::core_count`] returns the *big*-core count used as the
+/// HCN divisor.  `ChipInfo::core_count` is a different wire field decoded
+/// from the ChipId register response and must not be used here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NonceRangeConfig {
     /// Raw bytes as sent over the wire
@@ -227,7 +242,8 @@ pub struct NonceRangeConfig {
 }
 
 impl NonceRangeConfig {
-    // Nonce range values for different chain lengths (captured from hardware)
+    // Empirical nonce-range values captured from production hardware.
+    // Kept for reference and use in protocol captures / tests.
     const SINGLE_CHIP: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
     const SMALL_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x1f]; // 2-8 chips
     const MEDIUM_CHAIN: [u8; 4] = [0xff, 0xff, 0xff, 0x0f]; // 9-16 chips
@@ -236,6 +252,35 @@ impl NonceRangeConfig {
     const S21_PRO: [u8; 4] = [0x00, 0x00, 0x1e, 0xb5]; // 65-128 chips (empirical)
     const DEFAULT_LARGE: [u8; 4] = [0xff, 0xff, 0xff, 0x01]; // >128 chips
 
+    /// Compute HCN register value from chip topology and clock frequency.
+    ///
+    /// Implements the formula from ESP-Miner `bm1370.c` `BM1370_set_nonce_space`:
+    ///
+    /// ```text
+    /// hcn_space    = 2^32 / next_pow2(big_cores) / next_pow2(chip_count)
+    /// hcn_max      = hcn_space × 25 MHz / freq_mhz × 0.5
+    /// hcn_register = floor(hcn_max − 268)        // 268 = 2 × 134 per-clock errata
+    /// ```
+    ///
+    /// `big_cores` is [`ChipType::core_count`] — the number of hash domains, not
+    /// the total small-engine count.
+    ///
+    /// When PLL frequency becomes a runtime knob, the caller must pass the live
+    /// frequency; 525.0 is the current fixed target for the Bitaxe Gamma.
+    pub fn computed(big_cores: u32, chip_count: u32, freq_mhz: f64) -> Self {
+        // Reference: ESP-Miner bm1370.c BM1370_set_nonce_space
+        // https://github.com/bitaxeorg/ESP-Miner/pull/420
+        const NONCE_SPACE: f64 = (u32::MAX as f64) + 1.0; // 2^32
+        const CRYSTAL_MHZ_F64: f64 = 25.0;
+        const ERRATA: f64 = 268.0; // 2 × 134 per-clock correction
+        let cores_up = big_cores.next_power_of_two() as f64;
+        let chips_up = chip_count.next_power_of_two() as f64;
+        let hcn_space = NONCE_SPACE / cores_up / chips_up;
+        let hcn_max = hcn_space * CRYSTAL_MHZ_F64 / freq_mhz * 0.5;
+        let value = (hcn_max - ERRATA).max(0.0) as u32;
+        Self::from_raw(value)
+    }
+
     /// Create config for single chip (full range)
     pub fn single_chip() -> Self {
         Self {
@@ -243,7 +288,7 @@ impl NonceRangeConfig {
         }
     }
 
-    /// Create config for multi-chip chain
+    /// Empirical lookup by chain length — kept for reference and captures.
     pub fn multi_chip(chain_length: usize) -> Self {
         let bytes = match chain_length {
             1 => Self::SINGLE_CHIP,
@@ -257,8 +302,9 @@ impl NonceRangeConfig {
         Self { bytes }
     }
 
-    /// Create config from raw 32-bit value (little-endian)
-    /// Used for exact configuration from protocol captures
+    /// Create config from raw 32-bit value (little-endian).
+    ///
+    /// Used for exact configuration from protocol captures.
     pub fn from_raw(value: u32) -> Self {
         Self {
             bytes: value.to_le_bytes(),
@@ -2715,5 +2761,26 @@ impl BM13xxProtocol {
             chip_address: 0,
             register_address: RegisterAddress::ChipId,
         }
+    }
+}
+
+#[cfg(test)]
+mod hcn_tests {
+    use super::*;
+
+    #[test]
+    fn hcn_single_bm1370_matches_espminer_reference() {
+        // Reference: ESP-Miner bm1370.c BM1370_set_nonce_space
+        // 1 chip, 128 big cores, 525 MHz → 0xC2FB7
+        let cfg = NonceRangeConfig::computed(128, 1, 525.0);
+        assert_eq!(u32::from_le_bytes(<[u8; 4]>::from(cfg)), 0xC2FB7);
+    }
+
+    #[test]
+    fn hcn_chips_rounded_to_next_power_of_two() {
+        // 3 chips rounds up to 4, so the result is identical to 4 chips.
+        let three = NonceRangeConfig::computed(128, 3, 525.0);
+        let four = NonceRangeConfig::computed(128, 4, 525.0);
+        assert_eq!(<[u8; 4]>::from(three), <[u8; 4]>::from(four));
     }
 }
